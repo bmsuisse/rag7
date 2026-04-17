@@ -38,6 +38,7 @@ attr_list = {}
 "Multi-Collection" = "collections.md"
 "Auto Strategy" = "auto-strategy.md"
 "Async & Sync" = "async.md"
+"Tracing & Verbose" = "tracing.md"
 
 [project.nav."Reference"]
 "Configuration" = "configuration.md"
