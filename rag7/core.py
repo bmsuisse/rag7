@@ -1429,7 +1429,12 @@ class AgenticRAG:
             HumanMessage(f"Context:\n{numbered}\n\nQuestion: {state.question}")
         )
         response = await self._gen_llm.ainvoke(messages)
-        new = state.model_copy(update={"answer": str(response.content)})
+        update: dict[str, Any] = {"answer": str(response.content)}
+        # Don't persist retrieved documents in the checkpoint — they're
+        # re-fetched on every call. Keeps checkpointed state lean.
+        if self._checkpointer is not None:
+            update["documents"] = []
+        new = state.model_copy(update=update)
         self._trace(
             new,
             "generate",
