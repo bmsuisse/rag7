@@ -1,8 +1,15 @@
 # Memory & Persistence
 
-rag7 is built on LangGraph. Adding memory means passing a LangGraph **checkpointer** — the graph stores and resumes state per `thread_id` automatically.
+rag7 is built on LangGraph and supports two levels of memory:
 
-You only need this when you want the graph itself to remember previous turns across separate `invoke` calls. For simple multi-turn chat within a single session, the `history` parameter on `chat()` is enough.
+| | `checkpointer=` | `memory_store=` |
+|--|----------------|-----------------|
+| **Scope** | Per thread (conversation) | Per user (cross-thread) |
+| **What's stored** | Full graph state | Key Q&A facts |
+| **Survives restarts** | With SQLite/Postgres | With SQLite/Postgres |
+| **Use case** | Resume a conversation | Remember user preferences across sessions |
+
+For simple multi-turn chat within a single session, the `history=` parameter on `chat()` is enough — no config needed.
 
 ## In-process memory (MemorySaver)
 
@@ -81,14 +88,77 @@ rag.invoke("Who are you?", config={"configurable": {"thread_id": "user-alice"}})
 rag.invoke("Who are you?", config={"configurable": {"thread_id": "user-bob"}})
 ```
 
+---
+
+## Long-term memory (memory_store)
+
+Cross-thread memory that persists facts across different conversations and users. After each answer the agent writes a Q&A summary; before each retrieval it reads relevant past exchanges and uses them as context.
+
+```python
+from rag7 import init_agent
+from langgraph.store.memory import InMemoryStore
+
+rag = init_agent(
+    "docs",
+    model="openai:gpt-4o",
+    backend="qdrant",
+    backend_url="http://localhost:6333",
+    memory_store=InMemoryStore(),
+)
+
+# Scope memories to a user with user_id
+config = {"configurable": {"user_id": "alice"}}
+
+rag.invoke("I prefer answers in German.", config=config)
+rag.invoke("What is hybrid search?", config=config)
+# Second call remembers the language preference from the first
+```
+
+Combine both for full memory:
+
+```python
+from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.store.memory import InMemoryStore
+
+rag = init_agent(
+    "docs",
+    model="openai:gpt-4o",
+    backend="qdrant",
+    checkpointer=SqliteSaver.from_conn_string("./memory.db"),
+    memory_store=InMemoryStore(),
+)
+
+config = {"configurable": {"thread_id": "session-1", "user_id": "alice"}}
+state = rag.invoke("What is hybrid search?", config=config)
+
+# state.trace includes a 'read_memory' entry showing what was recalled
+for step in state.trace:
+    if step["node"] == "read_memory":
+        print("Recalled:", step.get("memories"))
+```
+
+For production, replace `InMemoryStore` with `AsyncPostgresStore`:
+
+```python
+from langgraph.store.postgres import AsyncPostgresStore
+
+store = AsyncPostgresStore.from_conn_string("postgresql://user:pass@localhost/mydb")
+await store.setup()  # creates tables on first run
+
+rag = init_agent("docs", model="openai:gpt-4o", memory_store=store)
+```
+
+---
+
 ## When to use memory vs history
 
-| | `history=` on `chat()` | `checkpointer=` |
-|--|------------------------|-----------------|
-| How it works | You manage the list | LangGraph manages state |
-| Persistence | Only within your process | Survives restarts (SQLite/Postgres) |
-| Use case | Simple multi-turn in one session | Chatbots, resumable conversations |
-| Setup | No config needed | Pass checkpointer + thread_id |
+| | `history=` on `chat()` | `checkpointer=` | `memory_store=` |
+|--|------------------------|-----------------|-----------------|
+| Scope | Single session | Per thread | Per user (cross-thread) |
+| What's stored | Answer text | Full graph state | Key Q&A facts |
+| Survives restarts | No | With SQLite/Postgres | With Postgres store |
+| Use case | Simple multi-turn | Resumable chatbots | User preferences, long-term context |
+| Config key | _(none)_ | `thread_id` | `user_id` |
 
 !!! tip
-    Under the hood `chat()` with `history=` is rag7's own lightweight memory. `checkpointer=` hands memory to LangGraph directly — the full graph state (including trace, iterations, quality signals) is checkpointed, not just the answer text.
+    Combine all three for full coverage: `history=` for the current turn, `checkpointer=` to resume the thread, `memory_store=` to recall facts from previous sessions.

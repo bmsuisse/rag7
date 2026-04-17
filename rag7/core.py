@@ -293,6 +293,12 @@ class AgenticRAG:
         ``PostgresSaver`` for durable persistence. When set, pass
         ``config={"configurable": {"thread_id": "..."}}`` to ``invoke`` /
         ``chat`` to scope memory to a conversation thread.
+    memory_store:
+        LangGraph ``BaseStore`` for long-term cross-thread memory. The agent
+        reads relevant past exchanges before retrieval and writes a summary
+        after each answer. Pass ``config={"configurable": {"user_id": "..."}}``
+        to scope memories per user. Use ``InMemoryStore`` for development or
+        ``AsyncPostgresStore`` / ``AsyncSqliteStore`` for production.
 
     Examples
     --------
@@ -498,6 +504,7 @@ class AgenticRAG:
         expert_threshold: float | None = None,
         verbose: bool | None = None,
         checkpointer: Any = None,
+        memory_store: Any = None,
     ):
         self.index = index
         if collections:
@@ -610,6 +617,7 @@ class AgenticRAG:
         self._toolset = RAGToolset(self)
         self._tools = self._toolset.as_tools()
         self._checkpointer = checkpointer
+        self._memory_store = memory_store
         self._graph = self._build_graph()
         self._agent = self._build_agent()
 
@@ -1673,7 +1681,40 @@ class AgenticRAG:
     def _reason_route(self, state: RAGState) -> Literal["reason", "quality_gate"]:
         return "reason" if self._needs_reasoning(state) else "quality_gate"
 
+    async def _aread_memory(self, state: RAGState, *, store: Any = None, config: Any = None) -> dict:
+        """Inject long-term memories into instructions before retrieval."""
+        if store is None:
+            return {}
+        try:
+            user_id = (config or {}).get("configurable", {}).get("user_id", "default")
+            memories = await store.asearch(("memories", user_id), query=state.question, limit=5)
+            if not memories:
+                return {}
+            mem_text = "\n".join(f"- {m.value['text']}" for m in memories)
+            # Memories are surfaced via trace so callers can inspect them
+            return {"trace": state.trace + [{"node": "read_memory", "memories": mem_text}]}
+        except Exception:
+            return {}
+
+    async def _awrite_memory(self, state: RAGState, *, store: Any = None, config: Any = None) -> dict:
+        """Distil and save key facts from this exchange for future conversations."""
+        if store is None or not state.answer:
+            return {}
+        try:
+            user_id = (config or {}).get("configurable", {}).get("user_id", "default")
+            import uuid, time as _time
+            key = str(uuid.uuid4())
+            await store.aput(
+                ("memories", user_id),
+                key,
+                {"text": f"Q: {state.question}\nA: {state.answer[:300]}", "ts": _time.time()},
+            )
+        except Exception:
+            pass
+        return {}
+
     def _build_graph(self) -> Any:
+        store = self._memory_store
         g = StateGraph(RAGState)
         for name, fn in [
             ("smart_entry", lambda state: state),
@@ -1688,7 +1729,16 @@ class AgenticRAG:
         ]:
             g.add_node(name, fn)
 
-        g.add_edge(START, "smart_entry")
+        if store is not None:
+            g.add_node("read_memory", self._aread_memory)
+            g.add_node("write_memory", self._awrite_memory)
+
+        if store is not None:
+            g.add_edge(START, "read_memory")
+            g.add_edge("read_memory", "smart_entry")
+        else:
+            g.add_edge(START, "smart_entry")
+
         g.add_conditional_edges(
             "smart_entry",
             lambda s: "rerank" if s.documents else "parallel_start",
@@ -1716,9 +1766,14 @@ class AgenticRAG:
             {"generate": "generate", "rewrite": "rewrite", "give_up": "give_up"},
         )
         g.add_edge("rewrite", "retrieve")
-        g.add_edge("generate", END)
-        g.add_edge("give_up", END)
-        compiled = g.compile(checkpointer=self._checkpointer)
+        if store is not None:
+            g.add_edge("generate", "write_memory")
+            g.add_edge("write_memory", END)
+            g.add_edge("give_up", "write_memory")
+        else:
+            g.add_edge("generate", END)
+            g.add_edge("give_up", END)
+        compiled = g.compile(checkpointer=self._checkpointer, store=store if store is not None else None)
         compiled.step_timeout = 120.0 if self._expert_reranker else 30.0
         return compiled
 
@@ -1755,6 +1810,7 @@ class AgenticRAG:
             self._llm,
             self._tools,
             system_prompt=system_prompt,
+            store=self._memory_store,
             middleware=[  # ty: ignore[invalid-argument-type]
                 ToolCallLimitMiddleware(run_limit=10, exit_behavior="end"),  # type: ignore[arg-type]
                 ToolRetryMiddleware(
