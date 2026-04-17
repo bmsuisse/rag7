@@ -39,6 +39,7 @@ attr_list = {}
 "Auto Strategy" = "auto-strategy.md"
 "Async & Sync" = "async.md"
 "Tracing & Verbose" = "tracing.md"
+"Memory & Persistence" = "memory.md"
 
 [project.nav."Reference"]
 "Configuration" = "configuration.md"

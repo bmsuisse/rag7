@@ -287,6 +287,12 @@ class AgenticRAG:
         boost-aware reranking.
     name_field:
         Metadata field used as the document name for token-overlap boosting.
+    checkpointer:
+        LangGraph checkpointer for persistent memory across calls. Pass a
+        ``MemorySaver`` for in-process memory, or ``SqliteSaver`` /
+        ``PostgresSaver`` for durable persistence. When set, pass
+        ``config={"configurable": {"thread_id": "..."}}`` to ``invoke`` /
+        ``chat`` to scope memory to a conversation thread.
 
     Examples
     --------
@@ -491,6 +497,7 @@ class AgenticRAG:
         expert_top_n: int | None = None,
         expert_threshold: float | None = None,
         verbose: bool | None = None,
+        checkpointer: Any = None,
     ):
         self.index = index
         if collections:
@@ -602,6 +609,7 @@ class AgenticRAG:
 
         self._toolset = RAGToolset(self)
         self._tools = self._toolset.as_tools()
+        self._checkpointer = checkpointer
         self._graph = self._build_graph()
         self._agent = self._build_agent()
 
@@ -1710,7 +1718,7 @@ class AgenticRAG:
         g.add_edge("rewrite", "retrieve")
         g.add_edge("generate", END)
         g.add_edge("give_up", END)
-        compiled = g.compile(checkpointer=None)
+        compiled = g.compile(checkpointer=self._checkpointer)
         compiled.step_timeout = 120.0 if self._expert_reranker else 30.0
         return compiled
 
