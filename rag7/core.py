@@ -299,6 +299,13 @@ class AgenticRAG:
         after each answer. Pass ``config={"configurable": {"user_id": "..."}}``
         to scope memories per user. Use ``InMemoryStore`` for development or
         ``AsyncPostgresStore`` / ``AsyncSqliteStore`` for production.
+    mem0_memory:
+        A ``mem0`` ``Memory`` or ``AsyncMemory`` instance for smarter
+        long-term memory. Uses LLM-based fact extraction, deduplication, and
+        conflict resolution — stores discrete facts ("prefers German answers")
+        rather than raw Q&A strings. Preferred over ``memory_store`` when
+        available. Pass ``config={"configurable": {"user_id": "..."}}`` to
+        scope per user. Install: ``pip install mem0ai``.
 
     Examples
     --------
@@ -505,6 +512,7 @@ class AgenticRAG:
         verbose: bool | None = None,
         checkpointer: Any = None,
         memory_store: Any = None,
+        mem0_memory: Any = None,
     ):
         self.index = index
         if collections:
@@ -618,6 +626,7 @@ class AgenticRAG:
         self._tools = self._toolset.as_tools()
         self._checkpointer = checkpointer
         self._memory_store = memory_store
+        self._mem0_memory = mem0_memory
         self._graph = self._build_graph()
         self._agent = self._build_agent()
 
@@ -1687,7 +1696,9 @@ class AgenticRAG:
         return "reason" if self._needs_reasoning(state) else "quality_gate"
 
     async def _aread_memory(self, state: RAGState, *, store: Any = None, config: Any = None) -> dict:
-        """Inject long-term memories into instructions before retrieval."""
+        """Inject long-term memories into state trace before retrieval."""
+        if self._mem0_memory is not None:
+            return await self._aread_mem0(state, config=config)
         if store is None:
             return {}
         try:
@@ -1696,18 +1707,20 @@ class AgenticRAG:
             if not memories:
                 return {}
             mem_text = "\n".join(f"- {m.value['text']}" for m in memories)
-            # Memories are surfaced via trace so callers can inspect them
             return {"trace": state.trace + [{"node": "read_memory", "memories": mem_text}]}
         except Exception:
             return {}
 
     async def _awrite_memory(self, state: RAGState, *, store: Any = None, config: Any = None) -> dict:
         """Distil and save key facts from this exchange for future conversations."""
+        if self._mem0_memory is not None:
+            return await self._awrite_mem0(state, config=config)
         if store is None or not state.answer:
             return {}
         try:
             user_id = (config or {}).get("configurable", {}).get("user_id", "default")
-            import uuid, time as _time
+            import uuid
+            import time as _time
             key = str(uuid.uuid4())
             await store.aput(
                 ("memories", user_id),
@@ -1718,8 +1731,45 @@ class AgenticRAG:
             pass
         return {}
 
+    async def _aread_mem0(self, state: RAGState, *, config: Any = None) -> dict:
+        user_id = (config or {}).get("configurable", {}).get("user_id", "default")
+        try:
+            import asyncio
+            m = self._mem0_memory
+            if hasattr(m, "asearch"):
+                results = await m.asearch(state.question, user_id=user_id)
+            else:
+                results = await asyncio.to_thread(m.search, state.question, user_id=user_id)
+            entries = results.get("results", results) if isinstance(results, dict) else results
+            if not entries:
+                return {}
+            mem_text = "\n".join(f"- {r.get('memory', r)}" for r in entries[:5])
+            return {"trace": state.trace + [{"node": "read_memory", "memories": mem_text}]}
+        except Exception:
+            return {}
+
+    async def _awrite_mem0(self, state: RAGState, *, config: Any = None) -> dict:
+        if not state.answer:
+            return {}
+        user_id = (config or {}).get("configurable", {}).get("user_id", "default")
+        try:
+            import asyncio
+            m = self._mem0_memory
+            messages = [
+                {"role": "user", "content": state.question},
+                {"role": "assistant", "content": state.answer[:500]},
+            ]
+            if hasattr(m, "aadd"):
+                await m.aadd(messages, user_id=user_id)
+            else:
+                await asyncio.to_thread(m.add, messages, user_id=user_id)
+        except Exception:
+            pass
+        return {}
+
     def _build_graph(self) -> Any:
         store = self._memory_store
+        use_memory = store is not None or self._mem0_memory is not None
         g = StateGraph(RAGState)
         for name, fn in [
             ("smart_entry", lambda state: state),
@@ -1734,11 +1784,11 @@ class AgenticRAG:
         ]:
             g.add_node(name, fn)
 
-        if store is not None:
+        if use_memory:
             g.add_node("read_memory", self._aread_memory)
             g.add_node("write_memory", self._awrite_memory)
 
-        if store is not None:
+        if use_memory:
             g.add_edge(START, "read_memory")
             g.add_edge("read_memory", "smart_entry")
         else:
@@ -1771,7 +1821,7 @@ class AgenticRAG:
             {"generate": "generate", "rewrite": "rewrite", "give_up": "give_up"},
         )
         g.add_edge("rewrite", "retrieve")
-        if store is not None:
+        if use_memory:
             g.add_edge("generate", "write_memory")
             g.add_edge("write_memory", END)
             g.add_edge("give_up", "write_memory")

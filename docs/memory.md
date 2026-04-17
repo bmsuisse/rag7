@@ -90,6 +90,40 @@ rag.invoke("Who are you?", config={"configurable": {"thread_id": "user-bob"}})
 
 ---
 
+## Smarter long-term memory (mem0)
+
+`mem0` uses an LLM to extract discrete facts from each exchange, deduplicate them, and resolve conflicts — so "I moved to Berlin" replaces "I live in Munich" rather than creating two entries. It's the recommended choice when memory quality matters.
+
+```bash
+pip install mem0ai
+```
+
+```python
+from rag7 import init_agent
+from mem0 import Memory  # or AsyncMemory
+
+rag = init_agent(
+    "docs",
+    model="openai:gpt-4o",
+    backend="qdrant",
+    backend_url="http://localhost:6333",
+    mem0_memory=Memory(),
+)
+
+config = {"configurable": {"user_id": "alice"}}
+
+rag.invoke("I prefer answers in German.", config=config)
+rag.invoke("What is hybrid search?", config=config)
+# mem0 extracted the language preference and recalled it on the second call
+```
+
+mem0 supports its own vector and graph stores — see the [mem0 docs](https://docs.mem0.ai) for config options. The default uses OpenAI embeddings + a local vector DB.
+
+!!! tip "AsyncMemory"
+    Pass `AsyncMemory()` instead of `Memory()` for async-native calls — rag7 detects the `aadd` / `asearch` methods and avoids the thread-pool overhead.
+
+---
+
 ## Long-term memory (memory_store)
 
 Cross-thread memory that persists facts across different conversations and users. After each answer the agent writes a Q&A summary; before each retrieval it reads relevant past exchanges and uses them as context.
@@ -152,13 +186,14 @@ rag = init_agent("docs", model="openai:gpt-4o", memory_store=store)
 
 ## When to use memory vs history
 
-| | `history=` on `chat()` | `checkpointer=` | `memory_store=` |
-|--|------------------------|-----------------|-----------------|
-| Scope | Single session | Per thread | Per user (cross-thread) |
-| What's stored | Answer text | Full graph state | Key Q&A facts |
-| Survives restarts | No | With SQLite/Postgres | With Postgres store |
-| Use case | Simple multi-turn | Resumable chatbots | User preferences, long-term context |
-| Config key | _(none)_ | `thread_id` | `user_id` |
+| | `history=` on `chat()` | `checkpointer=` | `memory_store=` | `mem0_memory=` |
+|--|------------------------|-----------------|-----------------|----------------|
+| Scope | Single session | Per thread | Per user (cross-thread) | Per user (cross-thread) |
+| What's stored | Answer text | Full graph state | Raw Q&A strings | Extracted facts |
+| Deduplication | — | — | No | Yes (LLM-based) |
+| Survives restarts | No | With SQLite/Postgres | With Postgres store | With mem0 store |
+| Use case | Simple multi-turn | Resumable chatbots | Basic long-term context | Smart user preferences |
+| Config key | _(none)_ | `thread_id` | `user_id` | `user_id` |
 
 !!! tip
-    Combine all three for full coverage: `history=` for the current turn, `checkpointer=` to resume the thread, `memory_store=` to recall facts from previous sessions.
+    Combine all for full coverage: `history=` for the current turn, `checkpointer=` to resume the thread, `mem0_memory=` to recall extracted facts from previous sessions.

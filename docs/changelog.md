@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.5
+
+- `mem0_memory=` parameter for LLM-based fact extraction with deduplication and conflict resolution
+- Supports both `Memory` (sync via thread-pool) and `AsyncMemory` (native async)
+- Strips retrieved documents from checkpointed state to keep context lean
+
 ## 0.6.4
 
 - `auto_strategy=True` is now the default — rag7 is agentic out of the box
