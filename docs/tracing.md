@@ -2,6 +2,17 @@
 
 Every `invoke` / `chat` call returns a `RAGState` object that includes full pipeline metadata — which path was taken, timings per node, how many iterations ran, and whether the quality gate passed.
 
+!!! info "It's just LangGraph"
+    rag7 is built on [LangGraph](https://github.com/langchain-ai/langgraph). `RAGState` is a standard LangGraph state — the raw graph output is returned as-is, so you have full access to everything LangGraph tracks. You can also access `rag.graph` directly to inspect, extend, or wire the graph into a larger LangGraph application.
+
+    ```python
+    # Access the underlying LangGraph graph
+    graph = rag.graph
+
+    # Run it directly with full LangGraph control
+    result = await graph.ainvoke({"question": "What is RAG?"})
+    ```
+
 ## State fields
 
 | Field | Type | Description |
