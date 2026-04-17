@@ -1,0 +1,45 @@
+[project]
+site_name = "rag7"
+site_url = "https://bmsuisse.github.io/rag7"
+site_description = "Not just hybrid search. A true autonomous retrieval agent."
+site_author = "Dominik Peter"
+repo_url = "https://github.com/bmsuisse/rag7"
+repo_name = "bmsuisse/rag7"
+extra_css = ["assets/extra.css"]
+
+[project.theme]
+variant = "modern"
+
+[project.extra]
+social = [
+  { icon = "fontawesome/brands/github", link = "https://github.com/bmsuisse/rag7" },
+  { icon = "fontawesome/brands/python", link = "https://pypi.org/project/rag7/" },
+]
+
+[project.markdown_extensions]
+admonition = {}
+md_in_html = {}
+attr_list = {}
+"pymdownx.details" = {}
+"pymdownx.superfences" = {}
+"pymdownx.highlight" = { anchor_linenums = true, line_spans = "__span", pygments_lang_class = true }
+"pymdownx.inlinehilite" = {}
+"pymdownx.snippets" = {}
+"pymdownx.tabbed" = { alternate_style = true }
+
+[project.nav]
+"Home" = "index.md"
+"Quick Start" = "quickstart.md"
+
+[project.nav."Guide"]
+"Backends" = "backends.md"
+"Reranking" = "reranking.md"
+"Filtering" = "filtering.md"
+"Multi-Collection" = "collections.md"
+"Auto Strategy" = "auto-strategy.md"
+"Async & Sync" = "async.md"
+
+[project.nav."Reference"]
+"Configuration" = "configuration.md"
+"Examples" = "examples.md"
+"Changelog" = "changelog.md"
