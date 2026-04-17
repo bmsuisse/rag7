@@ -1,0 +1,174 @@
+[project]
+name = "rag7"
+version = "0.6.4"
+description = "rag7 — multi-backend retrieval-augmented generation with LangGraph"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{ name = "Dominik Peter" }]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Typing :: Typed",
+]
+dependencies = [
+    "langchain-core>=0.3.0",
+    "langchain>=0.3.0",
+    "langchain-openai>=0.3.0",
+    "langgraph>=0.4.0",
+    "numpy>=1.26.0",
+    "pydantic>=2.0.0",
+    "requests>=2.31.0",
+    "stop-words>=2024.1.1",
+    "tenacity>=8.2.0",
+]
+
+[project.optional-dependencies]
+cohere = ["cohere>=5.21.1"]
+huggingface = ["sentence-transformers>=3.0.0"]
+jina = ["httpx>=0.27.0"]
+rerankers = ["rerankers>=0.6.0"]
+embed-anything = ["embed-anything>=0.7.0"]
+meilisearch = ["meilisearch>=0.40.0"]
+chromadb = ["chromadb>=1.0.0"]
+lancedb = ["lancedb>=0.20.0", "pyarrow>=23.0.1"]
+azure = ["azure-search-documents>=11.6.0", "azure-identity>=1.19.0"]
+faiss = ["faiss-cpu>=1.9.0"]
+pgvector = ["psycopg[binary]>=3.2.0", "pgvector>=0.4.0"]
+cache-pg = ["psycopg[binary]>=3.2.0", "psycopg-pool>=3.2.0"]
+qdrant = ["qdrant-client>=1.12.0"]
+duckdb = ["duckdb>=1.2.0"]
+cli = [
+    "rich>=13.0.0",
+    "python-dotenv>=1.2.2",
+]
+recommended = [
+    "meilisearch>=0.40.0",
+    "cohere>=5.21.1",
+    "rich>=13.0.0",
+    "python-dotenv>=1.2.2",
+]
+goldeneye = [  # 🍸 The classic — recommended loadout
+    "meilisearch>=0.40.0",
+    "cohere>=5.21.1",
+    "rich>=13.0.0",
+    "python-dotenv>=1.2.2",
+]
+skyfall = [  # 💥 Everything falls into place
+    "cohere>=5.21.1",
+    "meilisearch>=0.40.0",
+    "chromadb>=1.0.0",
+    "lancedb>=0.20.0",
+    "azure-search-documents>=11.6.0",
+    "azure-identity>=1.19.0",
+    "faiss-cpu>=1.9.0",
+    "psycopg[binary]>=3.2.0",
+    "pgvector>=0.4.0",
+    "qdrant-client>=1.12.0",
+    "duckdb>=1.2.0",
+    "sentence-transformers>=3.0.0",
+    "httpx>=0.27.0",
+    "rerankers>=0.6.0",
+    "embed-anything>=0.7.0",
+    "rich>=13.0.0",
+    "python-dotenv>=1.2.2",
+]
+thunderball = [  # ⚡ Vector power + precision reranking
+    "qdrant-client>=1.12.0",
+    "cohere>=5.21.1",
+    "rich>=13.0.0",
+    "python-dotenv>=1.2.2",
+]
+moonraker = [  # 🌙 Off the grid — fully local, no API keys
+    "chromadb>=1.0.0",
+    "sentence-transformers>=3.0.0",
+    "rich>=13.0.0",
+    "python-dotenv>=1.2.2",
+]
+goldfinger = [  # ☁️ All gold, all Azure
+    "azure-search-documents>=11.6.0",
+    "azure-identity>=1.19.0",
+    "cohere>=5.21.1",
+    "rich>=13.0.0",
+    "python-dotenv>=1.2.2",
+]
+spectre = [  # 👻 Open-source shadow ops — no paid APIs
+    "psycopg[binary]>=3.2.0",
+    "pgvector>=0.4.0",
+    "sentence-transformers>=3.0.0",
+    "rich>=13.0.0",
+    "python-dotenv>=1.2.2",
+]
+casino-royale = [  # 🎰 Lightweight first mission
+    "chromadb>=1.0.0",
+    "httpx>=0.27.0",
+    "rich>=13.0.0",
+    "python-dotenv>=1.2.2",
+]
+licence-to-kill = [  # 🦀 Rust-powered, fully local, zero API keys
+    "embed-anything>=0.7.0",
+    "chromadb>=1.0.0",
+    "rich>=13.0.0",
+    "python-dotenv>=1.2.2",
+]
+eval = [
+    "bm25s>=0.3.3",
+    "datasets>=4.8.4",
+    "mteb>=2.12.11",
+    "pandas>=3.0.2",
+    "pyarrow>=23.0.1",
+    "rich>=13.0.0",
+    "python-dotenv>=1.2.2",
+]
+all = [
+    "cohere>=5.21.1",
+    "meilisearch>=0.40.0",
+    "chromadb>=1.0.0",
+    "lancedb>=0.20.0",
+    "azure-search-documents>=11.6.0",
+    "azure-identity>=1.19.0",
+    "faiss-cpu>=1.9.0",
+    "psycopg[binary]>=3.2.0",
+    "pgvector>=0.4.0",
+    "qdrant-client>=1.12.0",
+    "duckdb>=1.2.0",
+    "sentence-transformers>=3.0.0",
+    "httpx>=0.27.0",
+    "rerankers>=0.6.0",
+    "rich>=13.0.0",
+    "python-dotenv>=1.2.2",
+]
+
+[project.scripts]
+rag7 = "rag7.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/bmsuisse/rag7"
+Repository = "https://github.com/bmsuisse/rag7"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["rag7"]
+
+[tool.hatch.build.targets.sdist]
+exclude = [".venv", ".uv-cache", ".uv_cache", ".ruff_cache", "bench", "scripts", "tests"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["E402", "E741", "F841"]
+
+[dependency-groups]
+dev = [
+    "faker>=40.13.0",
+    "pyright>=1.1.408",
+    "ruff>=0.15.9",
+]

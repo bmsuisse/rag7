@@ -1,0 +1,443 @@
+[
+  {
+    "seed": "bieröffner",
+    "variants": [
+      "Flaschenöffner für Bier",
+      "Bierflaschenöffner",
+      "Öffner für Bierflaschen"
+    ]
+  },
+  {
+    "seed": "Geberit Dusch-WC Wandklosett spülrandlos",
+    "variants": [
+      "Geberit Dusch-WC Wandklosett ohne Spülrand",
+      "Wandklosett Dusch-WC von Geberit spülrandlos",
+      "spülrandloses Geberit Dusch-WC Wand-WC"
+    ]
+  },
+  {
+    "seed": "Laufen Wandklosett rimless Einbauspülkasten",
+    "variants": [
+      "Laufen Wandklosett mit Einbauspülkasten und rimless",
+      "Rimless Laufen Wandklosett für Einbauspülkasten",
+      "Laufen Wand-WC rimless mit Einbauspülkasten"
+    ]
+  },
+  {
+    "seed": "Holcim OPTIMO Zement Siloware",
+    "variants": [
+      "Siloware Zement Holcim OPTIMO",
+      "Holcim OPTIMO Zement im Silo"
+    ]
+  },
+  {
+    "seed": "Geberit Spülkasten AP Zweimengenbetätigung",
+    "variants": [
+      "Geberit Spülkasten AP mit Zweimengenbetätigung",
+      "AP-Spülkasten von Geberit mit Zweimengenbetätigung",
+      "Geberit Aufputz-Spülkasten Zweimengenbetätigung"
+    ]
+  },
+  {
+    "seed": "SPAX Inox A4 Schrauben Torx",
+    "variants": [
+      "SPAX Inox A4 Torx Schrauben",
+      "Torx Schrauben von SPAX Inox A4",
+      "SPAX A4 Inox Schrauben mit Torx"
+    ]
+  },
+  {
+    "seed": "Isolierband PVC schwarz Tesa",
+    "variants": [
+      "Tesa Isolierband PVC schwarz",
+      "schwarzes PVC-Isolierband von Tesa",
+      "Tesa schwarzes Isolierband aus PVC"
+    ]
+  },
+  {
+    "seed": "fertigbeton",
+    "variants": [
+      "Fertigbeton",
+      "Beton fertig gemischt",
+      "vorgefertigter Beton"
+    ]
+  },
+  {
+    "seed": "bohr maschine",
+    "variants": [
+      "bohrmaschine",
+      "akku bohrmaschine"
+    ]
+  },
+  {
+    "seed": "bohrer",
+    "variants": [
+      "Bohrer",
+      "Bohrer kaufen"
+    ]
+  },
+  {
+    "seed": "zement für eine mauer",
+    "variants": [
+      "Mauerzement",
+      "Zement für eine Mauer",
+      "Zement zum Mauern"
+    ]
+  },
+  {
+    "seed": "rohr verstopft",
+    "variants": [
+      "verstopftes rohr",
+      "rohr ist verstopft",
+      "hilfe bei verstopftem rohr"
+    ]
+  },
+  {
+    "seed": "dach abdichten",
+    "variants": [
+      "dach gegen undichtigkeiten abdichten",
+      "dach wasserdicht abdichten"
+    ]
+  },
+  {
+    "seed": "heizung reparatur ventil",
+    "variants": [
+      "ventil heizung reparatur",
+      "heizung ventil reparatur",
+      "reparatur ventil für heizung"
+    ]
+  },
+  {
+    "seed": "stein bohrer",
+    "variants": [
+      "Steinbohrer",
+      "Bohrer für Stein",
+      "Stein-Bohrer"
+    ]
+  },
+  {
+    "seed": "gewebeschlauch wasser",
+    "variants": [
+      "Wasserschlauch aus Gewebe",
+      "Gewebeschlauch für Wasser",
+      "Wasser-Gewebeschlauch"
+    ]
+  },
+  {
+    "seed": "SDS Plus Bohrer",
+    "variants": [
+      "Bohrer SDS Plus",
+      "SDS-Plus Bohrer",
+      "SDS Plus Bohrersatz"
+    ]
+  },
+  {
+    "seed": "PE-X Rohr 16mm",
+    "variants": [
+      "16mm PE-X Rohr",
+      "PE-X Rohr mit 16 mm Durchmesser",
+      "16 mm PE-X Rohr"
+    ]
+  },
+  {
+    "seed": "M10 Sechskantschraube",
+    "variants": [
+      "Sechskantschraube M10",
+      "M10 Hexagon-Schraube"
+    ]
+  },
+  {
+    "seed": "Bosch Expert Hammerbohrer SDS-Plus 7X 10x200x265mm",
+    "variants": [
+      "Bosch SDS-Plus 7X Expert Hammerbohrer 10x200x265mm",
+      "Hammerbohrer Bosch Expert 7X SDS-Plus 10 x 200 x 265 mm"
+    ]
+  },
+  {
+    "seed": "Kies Körnung 8/16",
+    "variants": [
+      "Kies 8/16 Körnung",
+      "Körnung 8/16 Kies",
+      "Kies mit Körnung 8/16"
+    ]
+  },
+  {
+    "seed": "fliesen kleben boden",
+    "variants": [
+      "Bodenfliesen kleben",
+      "Fliesen für den Boden kleben",
+      "Boden mit Fliesen kleben"
+    ]
+  },
+  {
+    "seed": "schimmel bad entfernen",
+    "variants": [
+      "schimmel im bad entfernen",
+      "bad schimmel entfernen",
+      "mittel gegen schimmel im bad"
+    ]
+  },
+  {
+    "seed": "maurerkelle metall",
+    "variants": [
+      "Metall Maurerkelle",
+      "Maurerkelle aus Metall",
+      "Maurerkelle Metall"
+    ]
+  },
+  {
+    "seed": "Keller abdichten",
+    "variants": [
+      "Abdichtung für den Keller",
+      "Keller gegen Feuchtigkeit abdichten"
+    ]
+  },
+  {
+    "seed": "Abbruchhammer Meißel",
+    "variants": [
+      "Meißel für Abbruchhammer",
+      "Abbruchhammer-Meißel",
+      "Meißel passend für Abbruchhammer"
+    ]
+  },
+  {
+    "seed": "robinet machine à laver",
+    "variants": [
+      "robinet pour machine à laver",
+      "robinet de machine à laver"
+    ]
+  },
+  {
+    "seed": "colle carrelage SIKA flex",
+    "variants": [
+      "SIKA flex colle pour carrelage",
+      "colle flexible SIKA pour carrelage"
+    ]
+  },
+  {
+    "seed": "isolant laine de verre cloison",
+    "variants": [
+      "cloison isolant laine de verre",
+      "laine de verre pour cloison",
+      "isolant en laine de verre pour cloison"
+    ]
+  },
+  {
+    "seed": "tuyau descente cuivre",
+    "variants": [
+      "descente de tuyau en cuivre",
+      "tuyau de descente cuivre",
+      "gouttière descente cuivre"
+    ]
+  },
+  {
+    "seed": "enduit façade hydrofuge extérieur",
+    "variants": [
+      "enduit hydrofuge pour façade extérieure",
+      "enduit extérieur pour façade hydrofuge",
+      "façade extérieure enduit hydrofuge"
+    ]
+  },
+  {
+    "seed": "robinet qui goutte",
+    "variants": [
+      "fuite de robinet",
+      "réparer un robinet qui goutte"
+    ]
+  },
+  {
+    "seed": "imperméabiliser terrasse",
+    "variants": [
+      "imperméabiliser une terrasse",
+      "produit pour imperméabiliser terrasse",
+      "solution d'imperméabilisation pour terrasse"
+    ]
+  },
+  {
+    "seed": "tuyau chauffage",
+    "variants": [
+      "tuyau pour chauffage",
+      "tuyau de chauffage",
+      "tuyau chauffage maison"
+    ]
+  },
+  {
+    "seed": "robinet mélangeur lavabo",
+    "variants": [
+      "mélangeur de lavabo robinet",
+      "robinet pour lavabo mélangeur",
+      "lavabo robinet mélangeur"
+    ]
+  },
+  {
+    "seed": "carrelage sol antidérapant",
+    "variants": [
+      "carrelage antidérapant pour sol",
+      "carrelage de sol antidérapant",
+      "sol carrelage antidérapant"
+    ]
+  },
+  {
+    "seed": "fixation béton ancrage",
+    "variants": [
+      "ancrage fixation béton",
+      "fixation pour béton ancrage",
+      "ancrage béton fixation"
+    ]
+  },
+  {
+    "seed": "colle PVC tuyau pression",
+    "variants": [
+      "colle pour tuyau PVC pression",
+      "adhésif pour tuyau de pression en PVC",
+      "colle PVC pour pression tuyau"
+    ]
+  },
+  {
+    "seed": "tube cuivre 22mm",
+    "variants": [
+      "tube cuivre 22 mm",
+      "tube en cuivre de 22 mm",
+      "cuivre tube 22 mm"
+    ]
+  },
+  {
+    "seed": "vis à bois Torx",
+    "variants": [
+      "vis à bois avec empreinte Torx",
+      "vis bois Torx",
+      "vis pour bois tête Torx"
+    ]
+  },
+  {
+    "seed": "enduit plâtre lissage",
+    "variants": [
+      "lissage enduit plâtre",
+      "enduit de plâtre pour lissage",
+      "plâtre de lissage enduit"
+    ]
+  },
+  {
+    "seed": "colle parquet flottant",
+    "variants": [
+      "parquet flottant colle",
+      "colle pour parquet flottant",
+      "acheter colle parquet flottant"
+    ]
+  },
+  {
+    "seed": "gaine technique PVC",
+    "variants": [
+      "gaine technique en PVC",
+      "gaine PVC technique",
+      "tube gaine technique PVC"
+    ]
+  },
+  {
+    "seed": "chasse eau WC double touche",
+    "variants": [
+      "double flush toilet cistern flush button",
+      "WC dual flush flush mechanism",
+      "chasse d'eau WC à double touche"
+    ]
+  },
+  {
+    "seed": "Rigips Megaclip Dämmungshalter Mégastil",
+    "variants": [
+      "Mégastil Rigips Megaclip Dämmungshalter",
+      "Rigips Dämmungshalter Megaclip für Mégastil"
+    ]
+  },
+  {
+    "seed": "Bauder PIR Flachdach Hochleistungsdämmplatten",
+    "variants": [
+      "Bauder PIR Hochleistungsdämmplatten für Flachdach",
+      "Flachdach Dämmplatten PIR von Bauder",
+      "Bauder Flachdachdämmplatten aus PIR"
+    ]
+  },
+  {
+    "seed": "Protektor Blechschraube Flachkopf verzinkt TX30",
+    "variants": [
+      "verzinkte Protektor Blechschraube mit Flachkopf TX30",
+      "TX30 Flachkopf Blechschraube von Protektor, verzinkt"
+    ]
+  },
+  {
+    "seed": "Was ist die Wärmeleitfähigkeit λ von BauderPIR MAX Hochleistungsdämmplatten?",
+    "variants": [
+      "Wie hoch ist die Wärmeleitfähigkeit λ der BauderPIR MAX Hochleistungsdämmplatten?",
+      "BauderPIR MAX Hochleistungsdämmplatten: Welche Wärmeleitfähigkeit λ haben sie?",
+      "Ich suche die Wärmeleitfähigkeit λ von BauderPIR MAX Hochleistungsdämmplatten"
+    ]
+  },
+  {
+    "seed": "Protektor Deckenprofil CD 60-27 abgehängte Decke",
+    "variants": [
+      "Protektor CD 60-27 Deckenprofil für abgehängte Decke",
+      "abgehängte Decke Protektor Deckenprofil CD 60-27",
+      "CD 60-27 Deckenprofil von Protektor für abgehängte Decken"
+    ]
+  },
+  {
+    "seed": "Bossard Sechskantschraube DIN 933 verzinkt",
+    "variants": [
+      "verzinkte Bossard Sechskantschraube nach DIN 933",
+      "DIN 933 Sechskantschraube von Bossard, verzinkt"
+    ]
+  },
+  {
+    "seed": "Dichtungsbahn Bitumen Flachdach aufschweissbar",
+    "variants": [
+      "aufschweißbare Bitumen-Dichtungsbahn für Flachdach",
+      "Bitumen Flachdach Dichtungsbahn zum Aufschweißen",
+      "Flachdach-Dichtungsbahn aus Bitumen, aufschweißbar"
+    ]
+  },
+  {
+    "seed": "Protektor UA Profil Wandstärke 2mm Trockenbau",
+    "variants": [
+      "Protektor UA Profil 2mm Wandstärke Trockenbau",
+      "Trockenbau Protektor UA Profil mit 2 mm Wandstärke",
+      "UA Profil von Protektor für Trockenbau, Wandstärke 2mm"
+    ]
+  },
+  {
+    "seed": "Knauf Gipsplatte Feuerschutz",
+    "variants": [
+      "Feuerschutz Gipsplatte von Knauf",
+      "Knauf Feuerschutz-Gipsplatte"
+    ]
+  },
+  {
+    "seed": "Hilti Dübel Beton schwere Last",
+    "variants": [
+      "Hilti Dübel für Beton für schwere Lasten",
+      "schwere Lasten Dübel für Beton von Hilti",
+      "Hilti Beton-Dübel für hohe Traglast"
+    ]
+  },
+  {
+    "seed": "Rockwool Dämmung Zwischensparren",
+    "variants": [
+      "Zwischensparren-Dämmung aus Rockwool",
+      "Rockwool Dämmung für Zwischensparren",
+      "Rockwool Zwischensparren Dämmung"
+    ]
+  },
+  {
+    "seed": "Sika Dichtmasse Fugendichtung",
+    "variants": [
+      "Fugendichtung Dichtmasse von Sika",
+      "Sika Fugendichtmasse für Fugen"
+    ]
+  },
+  {
+    "seed": "Fischer Schraubanker Beton",
+    "variants": [
+      "Betonschraubanker Fischer",
+      "Fischer Anker für Beton",
+      "Schraubanker für Beton von Fischer"
+    ]
+  }
+]

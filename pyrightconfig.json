@@ -1,0 +1,7 @@
+{
+  "include": ["rag7"],
+  "pythonVersion": "3.11",
+  "typeCheckingMode": "standard",
+  "reportMissingImports": "none",
+  "reportMissingModuleSource": "none"
+}
