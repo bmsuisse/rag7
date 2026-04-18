@@ -793,6 +793,12 @@ class AgenticRAG:
         # Short, keyword-like questions don't benefit from LLM rewrite: skip the call.
         if len(state.question.split()) <= 6:
             raw = _strip_stop_words(state.question) or state.question
+            # Normalize token order for product-name queries so paraphrase variants
+            # ("Sand gewaschen 0-4mm" vs "Sand 0-4mm gewaschen") resolve to the
+            # same canonical BM25 query and thus retrieve the same candidate set.
+            tokens = raw.split()
+            if len(tokens) > 1:
+                raw = " ".join(sorted(tokens, key=str.lower))
             new = state.model_copy(
                 update={
                     "query": raw,
