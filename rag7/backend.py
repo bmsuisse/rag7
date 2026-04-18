@@ -177,9 +177,7 @@ def _build_sql_filter(intent: Any) -> str:
     if op == "NOT_CONTAINS":
         parts = [f"{field_name} NOT ILIKE '%{value}%'"]
         for extra in intent.extra_excludes:
-            parts.append(
-                f"{field_name} NOT ILIKE '%{_escape_sql_value(extra)}%'"
-            )
+            parts.append(f"{field_name} NOT ILIKE '%{_escape_sql_value(extra)}%'")
         return " AND ".join(parts)
     return f"{field_name} {op} '{value}'"
 
@@ -348,9 +346,7 @@ def _chroma_filter_from_str(expr: str) -> dict[str, Any] | None:
         m = _CHROMA_EQ_RE.match(part)
         if m:
             field, op, value = m.group(1), m.group(2), m.group(3)
-            clauses.append(
-                {field: value} if op == "=" else {field: {"$ne": value}}
-            )
+            clauses.append({field: value} if op == "=" else {field: {"$ne": value}})
             continue
         if _CHROMA_NOT_CONTAINS_RE.match(part):
             # Chroma metadata filters have no substring operator; dropping.
@@ -472,7 +468,6 @@ class LanceDBBackend(SearchBackend):
     def build_filter_expr(self, intent: Any) -> str:
         return _build_sql_filter(intent)
 
-
     def __init__(
         self,
         table: str,
@@ -562,7 +557,6 @@ class AzureAISearchBackend(SearchBackend):
 
     def build_filter_expr(self, intent: Any) -> str:
         return _build_odata_filter(intent)
-
 
     def __init__(
         self,
@@ -688,7 +682,6 @@ class AzureAISearchBackend(SearchBackend):
 class PgvectorBackend(SearchBackend):
     def build_filter_expr(self, intent: Any) -> str:
         return _build_sql_filter(intent)
-
 
     """PostgreSQL + pgvector backend. Requires `pip install psycopg[binary] pgvector`."""
 
@@ -943,7 +936,6 @@ class QdrantBackend(SearchBackend):
 class DuckDBBackend(SearchBackend):
     def build_filter_expr(self, intent: Any) -> str:
         return _build_sql_filter(intent)
-
 
     """DuckDB + VSS extension backend. Requires `pip install duckdb`."""
 

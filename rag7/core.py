@@ -1695,7 +1695,9 @@ class AgenticRAG:
     def _reason_route(self, state: RAGState) -> Literal["reason", "quality_gate"]:
         return "reason" if self._needs_reasoning(state) else "quality_gate"
 
-    async def _aread_memory(self, state: RAGState, *, store: Any = None, config: Any = None) -> dict:
+    async def _aread_memory(
+        self, state: RAGState, *, store: Any = None, config: Any = None
+    ) -> dict:
         """Inject long-term memories into state trace before retrieval."""
         if self._mem0_memory is not None:
             return await self._aread_mem0(state, config=config)
@@ -1703,15 +1705,21 @@ class AgenticRAG:
             return {}
         try:
             user_id = (config or {}).get("configurable", {}).get("user_id", "default")
-            memories = await store.asearch(("memories", user_id), query=state.question, limit=5)
+            memories = await store.asearch(
+                ("memories", user_id), query=state.question, limit=5
+            )
             if not memories:
                 return {}
             mem_text = "\n".join(f"- {m.value['text']}" for m in memories)
-            return {"trace": state.trace + [{"node": "read_memory", "memories": mem_text}]}
+            return {
+                "trace": state.trace + [{"node": "read_memory", "memories": mem_text}]
+            }
         except Exception:
             return {}
 
-    async def _awrite_memory(self, state: RAGState, *, store: Any = None, config: Any = None) -> dict:
+    async def _awrite_memory(
+        self, state: RAGState, *, store: Any = None, config: Any = None
+    ) -> dict:
         """Distil and save key facts from this exchange for future conversations."""
         if self._mem0_memory is not None:
             return await self._awrite_mem0(state, config=config)
@@ -1721,11 +1729,15 @@ class AgenticRAG:
             user_id = (config or {}).get("configurable", {}).get("user_id", "default")
             import uuid
             import time as _time
+
             key = str(uuid.uuid4())
             await store.aput(
                 ("memories", user_id),
                 key,
-                {"text": f"Q: {state.question}\nA: {state.answer[:300]}", "ts": _time.time()},
+                {
+                    "text": f"Q: {state.question}\nA: {state.answer[:300]}",
+                    "ts": _time.time(),
+                },
             )
         except Exception:
             pass
@@ -1735,16 +1747,25 @@ class AgenticRAG:
         user_id = (config or {}).get("configurable", {}).get("user_id", "default")
         try:
             import asyncio
+
             m = self._mem0_memory
             if hasattr(m, "asearch"):
                 results = await m.asearch(state.question, user_id=user_id)
             else:
-                results = await asyncio.to_thread(m.search, state.question, user_id=user_id)
-            entries = results.get("results", results) if isinstance(results, dict) else results
+                results = await asyncio.to_thread(
+                    m.search, state.question, user_id=user_id
+                )
+            entries = (
+                results.get("results", results)
+                if isinstance(results, dict)
+                else results
+            )
             if not entries:
                 return {}
             mem_text = "\n".join(f"- {r.get('memory', r)}" for r in entries[:5])
-            return {"trace": state.trace + [{"node": "read_memory", "memories": mem_text}]}
+            return {
+                "trace": state.trace + [{"node": "read_memory", "memories": mem_text}]
+            }
         except Exception:
             return {}
 
@@ -1754,6 +1775,7 @@ class AgenticRAG:
         user_id = (config or {}).get("configurable", {}).get("user_id", "default")
         try:
             import asyncio
+
             m = self._mem0_memory
             messages = [
                 {"role": "user", "content": state.question},
@@ -1828,7 +1850,9 @@ class AgenticRAG:
         else:
             g.add_edge("generate", END)
             g.add_edge("give_up", END)
-        compiled = g.compile(checkpointer=self._checkpointer, store=store if store is not None else None)
+        compiled = g.compile(
+            checkpointer=self._checkpointer, store=store if store is not None else None
+        )
         compiled.step_timeout = 120.0 if self._expert_reranker else 30.0
         return compiled
 

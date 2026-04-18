@@ -23,6 +23,7 @@ def _run_sync(coro: Coroutine[Any, Any, Any]) -> Any:
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
         return pool.submit(asyncio.run, coro).result()
 
+
 _DEFAULT_STOP_LANG = os.getenv("RAG_STOP_WORDS_LANG", "de")
 _STOP_WORDS: frozenset[str] = frozenset(
     w.lower() for w in _get_stop_words(_DEFAULT_STOP_LANG)
