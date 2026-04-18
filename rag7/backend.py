@@ -7,14 +7,9 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any
 
-# Collection names active for the current search context. Set by AgenticRAG
-# after LLM-routing selects a subset; read by _MultiBackend to fan out only
-# to those backends. None / empty list = use all registered collections.
 _ACTIVE_COLLECTIONS: ContextVar[list[str] | None] = ContextVar(
     "rag_active_collections", default=None
 )
-
-# ── SQL injection protection ──────────────────────────────────────────────────
 
 _SAFE_FILTER_RE = re.compile(
     r"^[\w\s.,=<>!'\"\-()%]+$",
@@ -64,8 +59,6 @@ class SearchRequest:
     limit: int
     vector: list[float] | None = None
     semantic_ratio: float = 0.0
-    # String form for Meili/SQL/OData dialects, dict form for Chroma/Qdrant
-    # native filters. Each backend normalizes in its own search().
     filter_expr: str | dict[str, Any] | None = None
     sort_fields: list[str] | None = None
     show_ranking_score: bool = False
@@ -130,14 +123,6 @@ class SearchBackend(ABC):
         filter_expr: str | None = None,
         attributes_to_retrieve: list[str] | None = None,
     ) -> list[dict]: ...
-
-    # ── Filter translation ────────────────────────────────────────────────
-    # Default dialect: Meilisearch (`=`, `!=`, `NOT field CONTAINS "x"`).
-    # SQL backends and Azure override build_filter_expr with their syntax.
-    #
-    # Kept narrow on purpose: takes the small set of operators that
-    # core._build_filter_expr previously emitted inline. Value escaping is
-    # applied per dialect to avoid injection of quote characters.
 
     def build_filter_expr(self, intent: Any) -> str:
         """Meili-dialect filter builder (default).
@@ -502,7 +487,6 @@ class LanceDBBackend(SearchBackend):
             if request.filter_expr:
                 results = results.where(request.filter_expr)
 
-            # Avoid to_pandas() — pandas is not a hard dep.
             rows = results.to_arrow().to_pylist()
             return self._rows_to_hits(rows)
         except Exception:
@@ -583,7 +567,7 @@ class AzureAISearchBackend(SearchBackend):
         self.index = index
 
     def search(self, request: SearchRequest) -> list[dict]:
-        from azure.search.documents.models import VectorizedQuery, VectorizableTextQuery
+        from azure.search.documents.models import VectorizableTextQuery, VectorizedQuery
 
         kwargs: dict[str, Any] = {
             "search_text": request.query or None,
