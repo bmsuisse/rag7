@@ -168,7 +168,14 @@ exclude = [".venv", ".uv-cache", ".uv_cache", ".ruff_cache", "bench", "scripts",
 
 [dependency-groups]
 dev = [
+    "azure-identity>=1.25.3",
     "faker>=40.13.0",
+    "langgraph-checkpoint-postgres>=3.0.5",
+    "mem0ai>=2.0.0",
+    "pgvector>=0.4.2",
+    "psycopg2-binary>=2.9.11",
+    "psycopg[binary]>=3.3.3",
     "pyright>=1.1.408",
+    "python-dotenv>=1.2.2",
     "ruff>=0.15.9",
 ]
