@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import math
 import os
 import re
@@ -19,6 +20,7 @@ from langchain.agents.middleware import (
 from langchain_core.documents import Document
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.runnables.config import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 from tenacity import retry, stop_after_attempt, wait_exponential
 
@@ -1696,7 +1698,11 @@ class AgenticRAG:
         return "reason" if self._needs_reasoning(state) else "quality_gate"
 
     async def _aread_memory(
-        self, state: RAGState, *, store: Any = None, config: Any = None
+        self,
+        state: RAGState,
+        *,
+        store: Any = None,
+        config: RunnableConfig | None = None,
     ) -> dict:
         """Inject long-term memories into state trace before retrieval."""
         if self._mem0_memory is not None:
@@ -1704,7 +1710,9 @@ class AgenticRAG:
         if store is None:
             return {}
         try:
-            user_id = (config or {}).get("configurable", {}).get("user_id", "default")
+            user_id = ((config or {}).get("configurable") or {}).get(
+                "user_id", "default"
+            )
             memories = await store.asearch(
                 ("memories", user_id), query=state.question, limit=5
             )
@@ -1718,7 +1726,11 @@ class AgenticRAG:
             return {}
 
     async def _awrite_memory(
-        self, state: RAGState, *, store: Any = None, config: Any = None
+        self,
+        state: RAGState,
+        *,
+        store: Any = None,
+        config: RunnableConfig | None = None,
     ) -> dict:
         """Distil and save key facts from this exchange for future conversations."""
         if self._mem0_memory is not None:
@@ -1726,7 +1738,9 @@ class AgenticRAG:
         if store is None or not state.answer:
             return {}
         try:
-            user_id = (config or {}).get("configurable", {}).get("user_id", "default")
+            user_id = ((config or {}).get("configurable") or {}).get(
+                "user_id", "default"
+            )
             import uuid
             import time as _time
 
@@ -1743,17 +1757,22 @@ class AgenticRAG:
             pass
         return {}
 
-    async def _aread_mem0(self, state: RAGState, *, config: Any = None) -> dict:
-        user_id = (config or {}).get("configurable", {}).get("user_id", "default")
+    async def _aread_mem0(
+        self, state: RAGState, *, config: RunnableConfig | None = None
+    ) -> dict:
+        user_id = ((config or {}).get("configurable") or {}).get("user_id", "default")
         try:
             import asyncio
+            import inspect
 
             m = self._mem0_memory
-            if hasattr(m, "asearch"):
-                results = await m.asearch(state.question, user_id=user_id)
+            search_fn = getattr(m, "asearch", None) or m.search
+            filters = {"user_id": user_id}
+            if inspect.iscoroutinefunction(search_fn):
+                results = await search_fn(state.question, filters=filters)
             else:
                 results = await asyncio.to_thread(
-                    m.search, state.question, user_id=user_id
+                    search_fn, state.question, filters=filters
                 )
             entries = (
                 results.get("results", results)
@@ -1769,24 +1788,28 @@ class AgenticRAG:
         except Exception:
             return {}
 
-    async def _awrite_mem0(self, state: RAGState, *, config: Any = None) -> dict:
+    async def _awrite_mem0(
+        self, state: RAGState, *, config: RunnableConfig | None = None
+    ) -> dict:
         if not state.answer:
             return {}
-        user_id = (config or {}).get("configurable", {}).get("user_id", "default")
+        user_id = ((config or {}).get("configurable") or {}).get("user_id", "default")
         try:
             import asyncio
+            import inspect
 
             m = self._mem0_memory
+            add_fn = getattr(m, "aadd", None) or m.add
             messages = [
                 {"role": "user", "content": state.question},
                 {"role": "assistant", "content": state.answer[:500]},
             ]
-            if hasattr(m, "aadd"):
-                await m.aadd(messages, user_id=user_id)
+            if inspect.iscoroutinefunction(add_fn):
+                await add_fn(messages, user_id=user_id)
             else:
-                await asyncio.to_thread(m.add, messages, user_id=user_id)
-        except Exception:
-            pass
+                await asyncio.to_thread(add_fn, messages, user_id=user_id)
+        except Exception as e:
+            logging.getLogger(__name__).warning("mem0 write failed: %s", e)
         return {}
 
     def _build_graph(self) -> Any:
@@ -2321,10 +2344,11 @@ class AgenticRAG:
     ) -> tuple[str, list[Document]]:
         return _run_sync(self._aretrieve_documents(query, top_k=top_k))
 
-    async def ainvoke(self, question: str) -> RAGState:
+    async def ainvoke(self, question: str, *, config: Any = None) -> RAGState:
         init = RAGState(question=question, query=question)
         state = await self._aparallel_start(init)
-        return cast(RAGState, await self._graph.ainvoke(state))
+        result = await self._graph.ainvoke(state, config=config)
+        return result if isinstance(result, RAGState) else RAGState(**result)
 
     async def astream(self, question: str):
         """Stream answer tokens for the final generate step.
@@ -2350,8 +2374,8 @@ class AgenticRAG:
             if content:
                 yield str(content)
 
-    def invoke(self, question: str) -> RAGState:
-        return _run_sync(self.ainvoke(question))
+    def invoke(self, question: str, *, config: Any = None) -> RAGState:
+        return _run_sync(self.ainvoke(question, config=config))
 
     async def abatch(self, questions: list[str]) -> list[RAGState]:
         return await asyncio.gather(*(self.ainvoke(q) for q in questions))
