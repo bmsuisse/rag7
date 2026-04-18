@@ -126,11 +126,24 @@
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.06);
 }
 
-/* Gold accent on links in slate mode */
-[data-md-color-scheme="slate"] .md-typeset a {
+/* Gold accent on links in slate mode — exclude buttons */
+[data-md-color-scheme="slate"] .md-typeset a:not(.btn-primary):not(.btn-secondary) {
   color: var(--bond-gold);
 }
 
-[data-md-color-scheme="slate"] .md-typeset a:hover {
+[data-md-color-scheme="slate"] .md-typeset a:not(.btn-primary):not(.btn-secondary):hover {
   color: #E8C96A;
+}
+
+/* Ensure button text is always readable */
+.hero-buttons .btn-primary,
+[data-md-color-scheme="slate"] .hero-buttons .btn-primary {
+  color: #0D0D0D !important;
+  -webkit-text-fill-color: #0D0D0D !important;
+}
+
+.hero-buttons .btn-secondary,
+[data-md-color-scheme="slate"] .hero-buttons .btn-secondary {
+  color: var(--bond-silver) !important;
+  -webkit-text-fill-color: var(--bond-silver) !important;
 }
