@@ -2316,12 +2316,17 @@ class AgenticRAG:
                 state.query, state.alternative_to, k
             )
 
+        # When BM25 completely fails (typo / transliteration / no keyword match),
+        # fall back to near-pure semantic search to recover recall.
+        effective_semantic_ratio = state.adaptive_semantic_ratio
+        if top_score < 0.4 and effective_semantic_ratio is None:
+            effective_semantic_ratio = 0.9
         broad_docs = await self._asearch(
             state.query,
             question=state.question,
             extra_bm25=state.query_variants,
             factor=self.retrieval_factor,
-            adaptive_semantic_ratio=state.adaptive_semantic_ratio,
+            adaptive_semantic_ratio=effective_semantic_ratio,
             adaptive_fusion=state.adaptive_fusion,
             hyde_text=hyde_text,
         )
