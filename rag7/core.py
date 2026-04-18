@@ -1357,7 +1357,12 @@ class AgenticRAG:
                     )
                     self._trace(new, "rerank", t0, skipped="confident")
                     return new
-        rerank_docs = self._make_rerank_docs(state.documents)
+        # Cap rerank input to 2*top_k: the reranker rarely promotes a doc from
+        # retrieval rank 20+ into the top-5, so reranking the full pool (up to
+        # top_k * retrieval_factor = 40) wastes compute without recall gain.
+        rerank_cap = max(self.top_k * 2, self.rerank_top_n * 2)
+        capped_docs = state.documents[:rerank_cap]
+        rerank_docs = self._make_rerank_docs(capped_docs)
         effective_top_n = len(rerank_docs)
         rerank_query = state.question or state.query
 
