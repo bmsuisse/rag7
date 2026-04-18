@@ -7,7 +7,7 @@ Every rag7 operation has both a sync and an async variant. The sync variants wor
 ```python
 from rag7 import init_agent
 
-rag = init_agent("docs", model="openai:gpt-4o", backend="qdrant",
+rag = init_agent("docs", model="openai:gpt-5.4", backend="qdrant",
                  backend_url="http://localhost:6333")
 
 state = rag.invoke("What is hybrid search?")
@@ -21,7 +21,7 @@ import asyncio
 from rag7 import init_agent
 
 async def main():
-    rag = init_agent("docs", model="openai:gpt-4o", backend="qdrant",
+    rag = init_agent("docs", model="openai:gpt-5.4", backend="qdrant",
                      backend_url="http://localhost:6333")
 
     state = await rag.ainvoke("What is hybrid search?")
@@ -37,7 +37,7 @@ from fastapi import FastAPI
 from rag7 import init_agent
 
 app = FastAPI()
-rag = init_agent("docs", model="openai:gpt-4o", backend="qdrant",
+rag = init_agent("docs", model="openai:gpt-5.4", backend="qdrant",
                  backend_url="http://localhost:6333")
 
 @app.post("/ask")

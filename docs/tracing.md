@@ -38,7 +38,7 @@ from rag7 import init_agent
 
 rag = init_agent(
     "my-index",
-    model="openai:gpt-4o",
+    model="openai:gpt-5.4",
     backend="meilisearch",
     reranker="cohere",
     verbose=True,
@@ -80,7 +80,7 @@ Example output:
 ```python
 from rag7 import init_agent
 
-rag = init_agent("my-index", model="openai:gpt-4o", backend="meilisearch")
+rag = init_agent("my-index", model="openai:gpt-5.4", backend="meilisearch")
 
 state = rag.invoke("What is hybrid search?")
 

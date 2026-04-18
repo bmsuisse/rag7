@@ -12,7 +12,7 @@ When your data lives in multiple indexes, rag7 can route each query to the right
         collections=["products", "faq", "policies"],
         backend="qdrant",
         backend_url="http://localhost:6333",
-        model="openai:gpt-4o",
+        model="openai:gpt-5.4",
     )
     ```
 
@@ -28,7 +28,7 @@ When your data lives in multiple indexes, rag7 can route each query to the right
         },
         backend="qdrant",
         backend_url="http://localhost:6333",
-        model="openai:gpt-4o",
+        model="openai:gpt-5.4",
     )
     ```
 

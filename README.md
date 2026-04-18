@@ -440,7 +440,7 @@ docs = [
 ]
 
 backend = InMemoryBackend(documents=docs)
-llm = ChatOpenAI(model="gpt-4o-mini")
+llm = ChatOpenAI(model="gpt-5.4-mini")
 
 rag = AgenticRAG(index="kb", backend=backend, llm=llm, gen_llm=llm)
 

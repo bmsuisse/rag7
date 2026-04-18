@@ -21,7 +21,7 @@ from langgraph.checkpoint.memory import MemorySaver
 
 rag = init_agent(
     "docs",
-    model="openai:gpt-4o",
+    model="openai:gpt-5.4",
     backend="qdrant",
     backend_url="http://localhost:6333",
     checkpointer=MemorySaver(),
@@ -44,7 +44,7 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 with SqliteSaver.from_conn_string("./memory.db") as checkpointer:
     rag = init_agent(
         "docs",
-        model="openai:gpt-4o",
+        model="openai:gpt-5.4",
         backend="qdrant",
         backend_url="http://localhost:6333",
         checkpointer=checkpointer,
@@ -69,7 +69,7 @@ checkpointer.setup()   # creates the checkpoint tables on first run
 
 rag = init_agent(
     "docs",
-    model="openai:gpt-4o",
+    model="openai:gpt-5.4",
     backend="qdrant",
     checkpointer=checkpointer,
 )
@@ -104,7 +104,7 @@ from mem0 import Memory  # or AsyncMemory
 
 rag = init_agent(
     "docs",
-    model="openai:gpt-4o",
+    model="openai:gpt-5.4",
     backend="qdrant",
     backend_url="http://localhost:6333",
     mem0_memory=Memory(),
@@ -134,7 +134,7 @@ from langgraph.store.memory import InMemoryStore
 
 rag = init_agent(
     "docs",
-    model="openai:gpt-4o",
+    model="openai:gpt-5.4",
     backend="qdrant",
     backend_url="http://localhost:6333",
     memory_store=InMemoryStore(),
@@ -156,7 +156,7 @@ from langgraph.store.memory import InMemoryStore
 
 rag = init_agent(
     "docs",
-    model="openai:gpt-4o",
+    model="openai:gpt-5.4",
     backend="qdrant",
     checkpointer=SqliteSaver.from_conn_string("./memory.db"),
     memory_store=InMemoryStore(),
@@ -179,7 +179,7 @@ from langgraph.store.postgres import AsyncPostgresStore
 store = AsyncPostgresStore.from_conn_string("postgresql://user:pass@localhost/mydb")
 await store.setup()  # creates tables on first run
 
-rag = init_agent("docs", model="openai:gpt-4o", memory_store=store)
+rag = init_agent("docs", model="openai:gpt-5.4", memory_store=store)
 ```
 
 ---

@@ -32,7 +32,7 @@ from rag7 import init_agent
 
 rag = init_agent(
     "products",
-    model="openai:gpt-4o",
+    model="openai:gpt-5.4",
     backend="meilisearch",
     filter="in_stock = true",
 )

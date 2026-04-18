@@ -26,7 +26,7 @@ The mission: find the right documents, neutralise irrelevant noise, and deliver 
 ```python
 from rag7 import init_agent
 
-rag = init_agent("documents", model="openai:gpt-4o", backend="qdrant")
+rag = init_agent("documents", model="openai:gpt-5.4", backend="qdrant")
 state = rag.chat("What is the status of operation overlord?")
 print(state.answer)  # Cited. Grounded. Delivered.
 ```

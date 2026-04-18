@@ -57,7 +57,7 @@ from rag7 import init_agent
 rag = init_agent(
     index="docs",               # collection name (omit when using collections=)
     collections=None,           # list[str] or dict[str, description]
-    model="openai:gpt-4o",      # "provider:model" string
+    model="openai:gpt-5.4",      # "provider:model" string
     gen_model=None,             # separate generation model (defaults to model)
     backend="memory",           # backend alias or SearchBackend instance
     backend_url=None,           # backend server URL

@@ -39,7 +39,7 @@ def _get_llm() -> Any:
         azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
         api_key=os.environ["AZURE_OPENAI_API_KEY"],  # type: ignore[arg-type]
         api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-12-01-preview"),
-        azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4o-mini"),
+        azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-5.4-mini"),
         temperature=0.3,
     )
 

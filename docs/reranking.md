@@ -21,20 +21,20 @@ Reranking re-scores the initial retrieval candidates with a more powerful model 
 from rag7 import init_agent
 
 # Cohere
-rag = init_agent("docs", model="openai:gpt-4o", reranker="cohere")
+rag = init_agent("docs", model="openai:gpt-5.4", reranker="cohere")
 
 # HuggingFace — runs locally, no API key
-rag = init_agent("docs", model="openai:gpt-4o", reranker="huggingface")
+rag = init_agent("docs", model="openai:gpt-5.4", reranker="huggingface")
 
 # HuggingFace with a multilingual model
-rag = init_agent("docs", model="openai:gpt-4o", reranker="huggingface",
+rag = init_agent("docs", model="openai:gpt-5.4", reranker="huggingface",
                  reranker_model="cross-encoder/mmarco-mMiniLMv2-L12-H384-v1")
 
 # Jina (uses JINA_API_KEY)
-rag = init_agent("docs", model="openai:gpt-4o", reranker="jina")
+rag = init_agent("docs", model="openai:gpt-5.4", reranker="jina")
 
 # ColBERT via the rerankers library
-rag = init_agent("docs", model="openai:gpt-4o", reranker="rerankers",
+rag = init_agent("docs", model="openai:gpt-5.4", reranker="rerankers",
                  reranker_model="colbert-ir/colbertv2.0",
                  reranker_kwargs={"model_type": "colbert"})
 
@@ -50,7 +50,7 @@ rag = init_agent("docs", reranker=CohereReranker(model="rerank-v3.5", api_key=".
 ```python
 rag = init_agent(
     "docs",
-    model="openai:gpt-4o",
+    model="openai:gpt-5.4",
     reranker="cohere",
     top_k=10,              # final result count returned to the LLM
     rerank_top_n=5,        # how many of top_k the reranker sees

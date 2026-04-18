@@ -32,7 +32,7 @@ print(state.answer)
 ```python
 from rag7 import init_agent
 
-rag = init_agent("docs", model="openai:gpt-4o", backend="qdrant",
+rag = init_agent("docs", model="openai:gpt-5.4", backend="qdrant",
                  backend_url="http://localhost:6333")
 
 query, docs = rag.retrieve_documents("What is retrieval-augmented generation?")
@@ -47,7 +47,7 @@ for doc in docs:
 ```python
 from rag7 import init_agent, ConversationTurn
 
-rag = init_agent("docs", model="openai:gpt-4o", backend="qdrant",
+rag = init_agent("docs", model="openai:gpt-5.4", backend="qdrant",
                  backend_url="http://localhost:6333")
 
 history: list[ConversationTurn] = []
@@ -67,7 +67,7 @@ from rag7 import init_agent
 
 rag = init_agent(
     "products",
-    model="openai:gpt-4o",
+    model="openai:gpt-5.4",
     backend="meilisearch",
     filter="in_stock = true",
 )
@@ -85,7 +85,7 @@ from rag7 import init_agent
 
 rag = init_agent(
     "products",
-    model="openai:gpt-4o",
+    model="openai:gpt-5.4",
     backend="meilisearch",
     filter="category != 'discontinued'",
 )
@@ -103,7 +103,7 @@ import asyncio
 from rag7 import init_agent
 
 async def main():
-    rag = init_agent("kb", model="openai:gpt-4o", backend="qdrant",
+    rag = init_agent("kb", model="openai:gpt-5.4", backend="qdrant",
                      backend_url="http://localhost:6333")
     state = await rag.ainvoke("What is hybrid search?")
     print(state.answer)
@@ -120,7 +120,7 @@ asyncio.run(main())
 ```python
 from rag7 import init_agent
 
-rag = init_agent("products", model="openai:gpt-4o", backend="meilisearch")
+rag = init_agent("products", model="openai:gpt-5.4", backend="meilisearch")
 
 # The LLM inspects the index schema, samples field values, and builds
 # the filter expression itself — no hardcoded filter needed.
@@ -137,7 +137,7 @@ import asyncio
 from rag7 import init_agent
 
 async def main():
-    rag = init_agent("docs", model="openai:gpt-4o", backend="qdrant",
+    rag = init_agent("docs", model="openai:gpt-5.4", backend="qdrant",
                      backend_url="http://localhost:6333")
     async for chunk in rag.astream("Explain retrieval-augmented generation"):
         print(chunk, end="", flush=True)
@@ -179,7 +179,7 @@ from rag7 import init_agent
 
 rag = init_agent(
     "legal-docs",
-    model="openai:gpt-4o",
+    model="openai:gpt-5.4",
     backend="qdrant",
     backend_url="http://localhost:6333",
     instructions=(

@@ -247,7 +247,7 @@ _RERANKER_OPTIONS: list[tuple[str, str, str]] = [
 # ── LLM options ───────────────────────────────────────────────────────────────
 
 _LLM_OPTIONS: list[tuple[str, str, str]] = [
-    ("openai", "OpenAI (gpt-4o, gpt-4o-mini, ...)", ""),
+    ("openai", "OpenAI (gpt-5.4, gpt-5.4-mini, ...)", ""),
     ("anthropic", "Anthropic (claude-sonnet-4-6, ...)", ""),
     ("ollama", "Ollama local (llama3, mistral, ...)", ""),
     ("env", "Use default from env vars", ""),
@@ -357,7 +357,7 @@ def _wizard() -> dict[str, Any]:
 
     model: str | None = None
     if llm_choice == "openai":
-        model_name = _prompt("  Model name", default="gpt-4o-mini")
+        model_name = _prompt("  Model name", default="gpt-5.4-mini")
         model = f"openai:{model_name}"
     elif llm_choice == "anthropic":
         model_name = _prompt("  Model name", default="claude-sonnet-4-6")

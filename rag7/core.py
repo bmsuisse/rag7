@@ -374,7 +374,7 @@ class AgenticRAG:
         from langchain_openai import ChatOpenAI
 
         return ChatOpenAI(  # type: ignore[call-arg]
-            model=os.getenv("OPENAI_MODEL", "gpt-4o"),  # ty: ignore[unknown-argument]
+            model=os.getenv("OPENAI_MODEL", "gpt-5.4"),  # ty: ignore[unknown-argument]
             api_key=os.getenv("OPENAI_API_KEY"),  # ty: ignore[unknown-argument]
             temperature=0,
             request_timeout=timeout,  # type: ignore[call-arg]
@@ -401,7 +401,7 @@ class AgenticRAG:
         from langchain_openai import ChatOpenAI
 
         return ChatOpenAI(  # type: ignore[call-arg]
-            model=os.getenv("OPENAI_MODEL", "gpt-4o"),  # ty: ignore[unknown-argument]
+            model=os.getenv("OPENAI_MODEL", "gpt-5.4"),  # ty: ignore[unknown-argument]
             api_key=os.getenv("OPENAI_API_KEY"),  # ty: ignore[unknown-argument]
             temperature=0,
             request_timeout=60,  # type: ignore[call-arg]

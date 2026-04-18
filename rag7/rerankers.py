@@ -97,7 +97,7 @@ class RerankersReranker:
         RerankersReranker("cross-encoder/ms-marco-MiniLM-L-6-v2", model_type="cross-encoder")
         RerankersReranker("colbert-ir/colbertv2.0", model_type="colbert")
         RerankersReranker("flashrank", model_type="flashrank")
-        RerankersReranker("gpt-4o-mini", model_type="rankgpt", api_key="...")
+        RerankersReranker("gpt-5.4-mini", model_type="rankgpt", api_key="...")
     """
 
     def __init__(self, model: str, model_type: str | None = None, **kwargs: object):

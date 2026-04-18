@@ -60,7 +60,7 @@ rag = init_agent("docs")
 # OpenAI + Qdrant + Cohere reranker
 rag = init_agent(
     "my-collection",
-    model="openai:gpt-4o",
+    model="openai:gpt-5.4",
     backend="qdrant",
     backend_url="http://localhost:6333",
     reranker="cohere",
@@ -93,7 +93,7 @@ rag = init_agent(
 ```python
 from rag7 import init_agent
 
-rag = init_agent("docs", model="openai:gpt-4o", backend="qdrant",
+rag = init_agent("docs", model="openai:gpt-5.4", backend="qdrant",
                  backend_url="http://localhost:6333")
 
 # Full agentic answer

@@ -50,7 +50,7 @@ rag = init_agent(
     backend_url="http://localhost:7700",   # default
     backend_kwargs={"api_key": "masterKey"},
     embed_fn=my_embed_fn,
-    model="openai:gpt-4o",
+    model="openai:gpt-5.4",
 )
 ```
 
@@ -81,7 +81,7 @@ rag = init_agent(
     backend="azure",
     backend_url="https://my-search.search.windows.net",
     backend_kwargs={"api_key": "your-admin-key"},
-    model="openai:gpt-4o",
+    model="openai:gpt-5.4",
 )
 ```
 
@@ -100,7 +100,7 @@ rag = init_agent(
     "my-collection",
     backend="chroma",
     embed_fn=my_embed_fn,
-    model="openai:gpt-4o",
+    model="openai:gpt-5.4",
 )
 ```
 
@@ -147,7 +147,7 @@ rag = init_agent(
     backend="qdrant",
     backend_url="http://localhost:6333",
     embed_fn=my_embed_fn,
-    model="openai:gpt-4o",
+    model="openai:gpt-5.4",
 )
 ```
 
