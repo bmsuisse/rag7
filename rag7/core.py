@@ -1283,8 +1283,44 @@ class AgenticRAG:
             msg = f"[rag {node}] {dur:.3f}s {extras}".rstrip()
             print(msg, file=sys.stderr, flush=True)
 
+    async def _acontextualize(self, state: RAGState) -> RAGState:
+        """Rewrite a follow-up question into a standalone query using history.
+
+        Without this, retrieval for "and the 18V one?" searches just those
+        four words — ignoring that the previous turn was about Makita
+        drills. Only fires when history is non-empty and the question is
+        short enough to likely be a follow-up. No-op otherwise.
+        """
+        if not state.history or len(state.question.split()) > 10:
+            return state
+        last = state.history[-1]
+        try:
+            resp = await self._llm.ainvoke(
+                [
+                    self._sys(
+                        "Rewrite the user's follow-up question as a standalone "
+                        "search query, using prior conversation for context. "
+                        "Preserve exact codes, numbers, product names. If the "
+                        "question is already standalone, return it unchanged. "
+                        "Reply with ONLY the rewritten query — no prose."
+                    ),
+                    HumanMessage(
+                        f"Previous question: {last.question}\n"
+                        f"Previous answer (first 300 chars): {last.answer[:300]}\n"
+                        f"Follow-up: {state.question}"
+                    ),
+                ]
+            )
+            rewritten = str(resp.content).strip().strip('"').strip("'")
+            if rewritten and rewritten != state.question and len(rewritten) < 500:
+                return state.model_copy(update={"question": rewritten})
+        except Exception:
+            pass
+        return state
+
     async def _aparallel_start(self, state: RAGState) -> RAGState:
         t0 = time.perf_counter()
+        state = await self._acontextualize(state)
         state = await self._aroute_collections(state)
         state = await self._apreprocess(state)
         if state.alternative_to:
