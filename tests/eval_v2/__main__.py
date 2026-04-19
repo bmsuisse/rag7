@@ -60,10 +60,13 @@ async def _build_rag(index: str, embed_fn: Any) -> Any:
     from rag7 import AgenticRAG
     from rag7.backend import MeilisearchBackend
 
+    from rag7 import RAGConfig
+
     return AgenticRAG(
         index=index,
         backend=MeilisearchBackend(index=index),
         embed_fn=embed_fn,
+        config=RAGConfig.auto(),
         auto_strategy=True,
     )
 
