@@ -478,7 +478,7 @@ class AgenticRAG:
         """Create default reranker: Cohere if available, else LLM-based."""
         try:
             return CohereReranker()
-        except (ImportError, Exception):
+        except Exception:
             return LLMReranker()
 
     @classmethod
@@ -906,26 +906,18 @@ class AgenticRAG:
                 self._enable_preprocess_llm = bool(config["enable_preprocess_llm"])
             if "short_query_threshold" in config:
                 self._short_query_threshold = int(config["short_query_threshold"])
-            # Belt-and-braces: always keep short-query token sort on. It's
-            # cheap, paraphrase-invariant, and helps more than it hurts
-            # even when the LLM preprocess is also active.
+            # Token sort is cheap and paraphrase-invariant — always on.
             self._short_query_sort_tokens = True
             print(f"  [{self.index}] strategy ({source}): {config}")
         except Exception as e:
             print(f"  [{self.index}] auto-strategy failed ({e}), using defaults")
 
     def _infer_name_and_group_fields(self, sample: list[dict]) -> None:
-        """Pick the primary name_field / group_field using the backend's
-        attribute priority + sample-doc heuristics.
+        """Pick name_field / group_field from the backend's searchable attrs.
 
-        ``name_field`` is the highest-priority string attribute that looks
-        like a human-readable identifier (typically ``*_name`` or the
-        first non-ID searchable attr). ``group_field`` is the first attr
-        matching group/category/class naming.
-
-        Backends like Meilisearch list searchable_attributes in priority
-        order, so the first informative string wins. For other backends
-        the list is unordered; the heuristic still picks sensible defaults.
+        ``name_field`` is the first string attr that looks human-readable
+        (``*_name`` or the first non-ID searchable attr). ``group_field`` is
+        the first attr matching group/category/class naming.
         """
         if self.name_field and self.group_field:
             return
@@ -1511,7 +1503,6 @@ class AgenticRAG:
                 tokens = {t for t in query.lower().split() if len(t) > 3}
                 if tokens:
                     name_f = self.name_field
-
                     boost_max = self._name_field_boost_max
 
                     def _tok_boost(d: Document) -> float:
@@ -1614,7 +1605,7 @@ class AgenticRAG:
                     ),
                     timeout=60.0,
                 )
-        except (asyncio.TimeoutError, Exception):
+        except Exception:
             return indexed
         rescored = [(idx_map[r.index], r.relevance_score) for r in results]
         return rescored + tail
@@ -1727,7 +1718,7 @@ class AgenticRAG:
             )
             self._trace(new, "rerank", t0, docs=len(ranked), expert_fired=expert_fired)
             return new
-        except (asyncio.TimeoutError, Exception) as e:
+        except Exception as e:
             self._trace(state, "rerank", t0, error=type(e).__name__)
             return state
 
@@ -2303,10 +2294,7 @@ class AgenticRAG:
         # token (year/version), or uppercase code. Embedded digits (bm25, oauth2)
         # are technical jargon, not entities — don't count them.
         words = question.strip().split()
-        # Language-agnostic filter-intent words (from/by/without) covering
-        # German, French, Italian, English — the four languages of the
-        # Swiss construction market. Any occurrence alongside a content
-        # word is a strong filter signal.
+        # Filter-intent tokens (from/by/without) across DE/FR/IT/EN.
         _FILTER_INTENT_WORDS = {
             # German
             "von", "vom", "aus", "ohne", "nicht", "kein", "keine",

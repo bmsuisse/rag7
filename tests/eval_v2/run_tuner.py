@@ -34,9 +34,22 @@ def build_testset() -> list[tuple[str, list[HIT_CASE], list[HIT_CASE]]]:
     ]
 
 
-async def _retrieve_ids(rag: Any, query: str, id_field: str, k: int = 5) -> list[str]:
+async def _retrieve_ids(
+    rag: Any, query: str, id_field: str, k: int = 5, latencies: list[float] | None = None
+) -> list[str]:
+    import time as _time
+
+    t0 = _time.perf_counter()
     _, docs = await rag._aretrieve_documents(query, top_k=k)
+    if latencies is not None:
+        latencies.append((_time.perf_counter() - t0) * 1000)
     return [str(d.metadata.get(id_field, "")) for d in docs]
+
+
+# Per-query latency budget. Queries faster than this get full speed credit;
+# slower queries get a linearly decaying share. Based on typical RAG UX where
+# 1.5s is "fast enough" and 3s starts feeling sluggish.
+_LATENCY_BUDGET_MS = 1500.0
 
 
 async def evaluate_config(
@@ -52,6 +65,7 @@ async def evaluate_config(
     consistencies: list[float] = []
     stable_count = 0
     group_count = 0
+    latencies: list[float] = []
     sem = asyncio.Semaphore(10)
 
     for index, hit_cases, base_cases in testset:
@@ -67,7 +81,7 @@ async def evaluate_config(
         async def _hit(case: HIT_CASE) -> bool:
             q, expected, field_name = case
             async with sem:
-                retrieved = await _retrieve_ids(rag, q, field_name)
+                retrieved = await _retrieve_ids(rag, q, field_name, latencies=latencies)
             return any(str(e) in retrieved for e in expected)
 
         total_hits += sum(await asyncio.gather(*(_hit(c) for c in hit_cases)))
@@ -77,12 +91,17 @@ async def evaluate_config(
         groups = paraphrase_groups(base_cases)
         for (seed_q, expected, field_name), variants in groups:
             async with sem:
-                seed_ids = await _retrieve_ids(rag, seed_q, field_name)
+                seed_ids = await _retrieve_ids(
+                    rag, seed_q, field_name, latencies=latencies
+                )
             seed_top1 = seed_ids[0] if seed_ids else None
             if not variants:
                 continue
             variant_tops = await asyncio.gather(
-                *(_retrieve_ids(rag, v, field_name) for v in variants)
+                *(
+                    _retrieve_ids(rag, v, field_name, latencies=latencies)
+                    for v in variants
+                )
             )
             expected_set = {str(e) for e in expected}
             hit_count = sum(
@@ -96,11 +115,21 @@ async def evaluate_config(
     hit_rate = total_hits / total if total else 0.0
     consistency = sum(consistencies) / len(consistencies) if consistencies else 0.0
     stable = stable_count / group_count if group_count else 0.0
+    mean_ms = sum(latencies) / len(latencies) if latencies else 0.0
+    # Speed factor: 1.0 when at/under budget, decaying toward 0 at 3× budget.
+    speed = max(0.0, min(1.0, 2.0 - mean_ms / _LATENCY_BUDGET_MS))
     return {
         "hit@5": hit_rate,
         "consistency": consistency,
         "stable_top1": stable,
+        "mean_latency_ms": mean_ms,
+        "speed": speed,
+        # Quality-primary combined (unchanged — lets us compare runs historically)
         "combined": hit_rate * 0.4 + consistency * 0.35 + stable * 0.25,
+        # Latency-weighted combined — rewards configs that are BOTH accurate and fast
+        "combined_prod": (
+            hit_rate * 0.35 + consistency * 0.30 + stable * 0.20 + speed * 0.15
+        ),
     }
 
 
@@ -157,11 +186,12 @@ def main() -> None:
         f"Baseline: hit@5={baseline_metrics['hit@5']:.4f} "
         f"consistency={baseline_metrics['consistency']:.4f} "
         f"stable={baseline_metrics['stable_top1']:.4f} "
-        f"combined={baseline_metrics['combined']:.4f}"
+        f"latency={baseline_metrics['mean_latency_ms']:.0f}ms "
+        f"combined={baseline_metrics['combined']:.4f} "
+        f"combined_prod={baseline_metrics['combined_prod']:.4f}"
     )
 
-    # Use the multi-index evaluator as the objective by flattening to one RAGTuner
-    # per index isn't ideal; build a custom optuna loop here.
+    # Custom optuna loop (RAGTuner is single-index; this eval is multi-index).
     import optuna
 
     def _suggest_float_or_none(
@@ -236,7 +266,7 @@ def main() -> None:
                     timeout=args.trial_timeout_s,
                 )
             )
-        except (asyncio.TimeoutError, Exception) as e:
+        except Exception as e:
             trial.set_user_attr("error", type(e).__name__)
             return 0.0
         for k, v in metrics.items():
@@ -319,11 +349,8 @@ def main() -> None:
             if base in NONEABLE and value is False:
                 decoded[base] = None
             continue
-        if key in NONEABLE and decoded.get(key) is None and key not in decoded:
-            # may already be None from _enabled=False in a previous key; skip
-            pass
         decoded[key] = value
-    # Re-apply None for _enabled=False even if the base key came after
+    # Re-apply None for _enabled=False even if the base key came after.
     for key in list(decoded.keys()):
         if key in NONEABLE and study.best_params.get(f"{key}_enabled") is False:
             decoded[key] = None
