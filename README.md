@@ -25,6 +25,25 @@ state = rag.chat("What is the status of operation overlord?")
 
 ---
 
+## 🎯 Scope — Retrieval, Not Ingestion
+
+**rag7 is built for optimal retrieval.** The mission is finding the right
+documents at query time — hybrid search, reranking, query rewriting,
+autonomous retry loops, and an LLM quality gate.
+
+**Ingestion is out of scope.** rag7 does not chunk, clean, embed-at-scale, or
+index your corpus. Use your stack of choice for that —
+[Docling](https://github.com/docling-project/docling),
+[Unstructured](https://unstructured.io),
+[LlamaIndex](https://www.llamaindex.ai) ingestion pipelines, a Databricks job,
+a custom script — then point rag7 at the resulting index. Every backend
+exposes a minimal `add_documents()` helper for convenience and smoke tests,
+but it is not meant to replace a real ingestion pipeline.
+
+Keeping the surface narrow is deliberate: one thing, done well.
+
+---
+
 ## 🕵️ The Agent
 
 *"We have a problem. Millions of documents. One question. And the clock is ticking."*
