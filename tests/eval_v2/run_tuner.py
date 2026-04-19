@@ -104,11 +104,45 @@ async def evaluate_config(
     }
 
 
+CANDIDATE_MODELS = ["azure:gpt-5.4-mini", "azure:gpt-5.4-nano"]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--trials", type=int, default=30)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output", default="rag7.config.toml")
+    parser.add_argument(
+        "--tune-models",
+        action="store_true",
+        help="Also tune weak/thinking model selection from CANDIDATE_MODELS",
+    )
+    parser.add_argument(
+        "--tune-strong-model",
+        action="store_true",
+        help=(
+            "Include strong_model (gen_llm) in the tuning search space. By "
+            "default strong_model is held fixed — generation quality is "
+            "rarely worth optimizing away."
+        ),
+    )
+    parser.add_argument(
+        "--strong-model",
+        default=None,
+        help="Fix strong_model to this spec (e.g. 'azure:brain').",
+    )
+    parser.add_argument(
+        "--patience",
+        type=int,
+        default=10,
+        help="Early-stop when no improvement for N trials (0 = no early stop)",
+    )
+    parser.add_argument(
+        "--trial-timeout-s",
+        type=float,
+        default=120.0,
+        help="Per-trial timeout (seconds) — slow/hung trials score 0",
+    )
     args = parser.parse_args()
 
     testset = build_testset()
@@ -117,7 +151,7 @@ def main() -> None:
 
     embed_fn = _make_azure_embed_fn()
 
-    baseline = RAGConfig()
+    baseline = RAGConfig(strong_model=args.strong_model) if args.strong_model else RAGConfig()
     baseline_metrics = asyncio.run(evaluate_config(baseline, testset, embed_fn))
     print(
         f"Baseline: hit@5={baseline_metrics['hit@5']:.4f} "
@@ -130,6 +164,15 @@ def main() -> None:
     # per index isn't ideal; build a custom optuna loop here.
     import optuna
 
+    def _suggest_float_or_none(
+        trial: optuna.Trial, name: str, low: float, high: float
+    ) -> float | None:
+        """Categorical 'enabled?' gate around a float range — lets TPE explore
+        'disable this stage' as a first-class hypothesis."""
+        if trial.suggest_categorical(f"{name}_enabled", [True, False]):
+            return trial.suggest_float(name, low, high)
+        return None
+
     def objective(trial: optuna.Trial) -> float:
         cfg = RAGConfig(
             retrieval_factor=trial.suggest_int("retrieval_factor", 2, 8),
@@ -141,12 +184,61 @@ def main() -> None:
             short_query_sort_tokens=trial.suggest_categorical(
                 "short_query_sort_tokens", [True, False]
             ),
-            bm25_fallback_threshold=trial.suggest_float("bm25_fallback_threshold", 0.2, 0.6),
+            bm25_fallback_threshold=_suggest_float_or_none(
+                trial, "bm25_fallback_threshold", 0.2, 0.6
+            ),
             bm25_fallback_semantic_ratio=trial.suggest_float(
                 "bm25_fallback_semantic_ratio", 0.7, 1.0
             ),
+            fast_accept_score=_suggest_float_or_none(
+                trial, "fast_accept_score", 0.5, 0.95
+            ),
+            fast_accept_confidence=_suggest_float_or_none(
+                trial, "fast_accept_confidence", 0.6, 0.95
+            ),
+            rerank_skip_dominance=_suggest_float_or_none(
+                trial, "rerank_skip_dominance", 0.6, 0.95
+            ),
+            rerank_skip_gap=trial.suggest_float("rerank_skip_gap", 0.05, 0.3),
+            expert_threshold=_suggest_float_or_none(
+                trial, "expert_threshold", 0.05, 0.3
+            ),
+            enable_hyde=trial.suggest_categorical("enable_hyde", [True, False]),
+            enable_filter_intent=trial.suggest_categorical(
+                "enable_filter_intent", [True, False]
+            ),
+            enable_quality_gate=trial.suggest_categorical(
+                "enable_quality_gate", [True, False]
+            ),
+            enable_preprocess_llm=trial.suggest_categorical(
+                "enable_preprocess_llm", [True, False]
+            ),
+            strong_model=(
+                trial.suggest_categorical("strong_model", CANDIDATE_MODELS)
+                if args.tune_models and args.tune_strong_model
+                else (args.strong_model or baseline.strong_model)
+            ),
+            weak_model=(
+                trial.suggest_categorical("weak_model", CANDIDATE_MODELS)
+                if args.tune_models
+                else None
+            ),
+            thinking_model=(
+                trial.suggest_categorical("thinking_model", CANDIDATE_MODELS)
+                if args.tune_models
+                else None
+            ),
         )
-        metrics = asyncio.run(evaluate_config(cfg, testset, embed_fn))
+        try:
+            metrics = asyncio.run(
+                asyncio.wait_for(
+                    evaluate_config(cfg, testset, embed_fn),
+                    timeout=args.trial_timeout_s,
+                )
+            )
+        except (asyncio.TimeoutError, Exception) as e:
+            trial.set_user_attr("error", type(e).__name__)
+            return 0.0
         for k, v in metrics.items():
             trial.set_user_attr(k, v)
         return metrics["combined"]
@@ -154,8 +246,13 @@ def main() -> None:
     sampler = optuna.samplers.TPESampler(seed=args.seed)
     study = optuna.create_study(direction="maximize", sampler=sampler)
 
-    # Seed with baseline
-    study.enqueue_trial({
+    # Seed trial 0 with the shipped baseline so TPE only improves on it.
+    def _enc(val: float | None, key: str) -> dict[str, Any]:
+        if val is None:
+            return {f"{key}_enabled": False}
+        return {f"{key}_enabled": True, key: val}
+
+    seed_params: dict[str, Any] = {
         "retrieval_factor": baseline.retrieval_factor,
         "rerank_top_n": baseline.rerank_top_n,
         "rerank_cap_multiplier": baseline.rerank_cap_multiplier,
@@ -163,11 +260,38 @@ def main() -> None:
         "fusion": baseline.fusion,
         "short_query_threshold": baseline.short_query_threshold,
         "short_query_sort_tokens": baseline.short_query_sort_tokens,
-        "bm25_fallback_threshold": baseline.bm25_fallback_threshold,
         "bm25_fallback_semantic_ratio": baseline.bm25_fallback_semantic_ratio,
-    })
+        "rerank_skip_gap": baseline.rerank_skip_gap,
+        "enable_hyde": baseline.enable_hyde,
+        "enable_filter_intent": baseline.enable_filter_intent,
+        "enable_quality_gate": baseline.enable_quality_gate,
+        "enable_preprocess_llm": baseline.enable_preprocess_llm,
+    }
+    for key, val in [
+        ("bm25_fallback_threshold", baseline.bm25_fallback_threshold),
+        ("fast_accept_score", baseline.fast_accept_score),
+        ("fast_accept_confidence", baseline.fast_accept_confidence),
+        ("rerank_skip_dominance", baseline.rerank_skip_dominance),
+        ("expert_threshold", baseline.expert_threshold),
+    ]:
+        seed_params.update(_enc(val, key))
+    if args.tune_models:
+        # Seed trial 0 with production-grade tiers.
+        if args.tune_strong_model:
+            seed_params["strong_model"] = args.strong_model or "azure:brain"
+        seed_params["weak_model"] = "azure:gpt-5.4-mini"
+        seed_params["thinking_model"] = "azure:gpt-5.4-mini"
+    study.enqueue_trial(seed_params)
 
-    study.optimize(objective, n_trials=args.trials, show_progress_bar=False)
+    from rag7.tuner import _EarlyStopCallback
+
+    callbacks = [_EarlyStopCallback(args.patience)] if args.patience > 0 else None
+    study.optimize(
+        objective,
+        n_trials=args.trials,
+        show_progress_bar=False,
+        callbacks=callbacks,
+    )
 
     best_trial = study.best_trial
     print(
@@ -179,7 +303,31 @@ def main() -> None:
     print(f"Baseline combined: {baseline_metrics['combined']:.4f}")
     print(f"Best params: {best_trial.params}")
 
-    merged = baseline.model_dump() | study.best_params
+    # Decode optuna search-space params back into RAGConfig fields:
+    # collapse "foo_enabled + foo" pairs into None or foo.
+    NONEABLE = {
+        "bm25_fallback_threshold",
+        "fast_accept_score",
+        "fast_accept_confidence",
+        "rerank_skip_dominance",
+        "expert_threshold",
+    }
+    decoded: dict[str, Any] = {}
+    for key, value in study.best_params.items():
+        if key.endswith("_enabled"):
+            base = key[: -len("_enabled")]
+            if base in NONEABLE and value is False:
+                decoded[base] = None
+            continue
+        if key in NONEABLE and decoded.get(key) is None and key not in decoded:
+            # may already be None from _enabled=False in a previous key; skip
+            pass
+        decoded[key] = value
+    # Re-apply None for _enabled=False even if the base key came after
+    for key in list(decoded.keys()):
+        if key in NONEABLE and study.best_params.get(f"{key}_enabled") is False:
+            decoded[key] = None
+    merged = baseline.model_dump() | decoded
     best = RAGConfig(**merged)
     best.save_toml(args.output)
     print(f"Saved best config -> {args.output}")

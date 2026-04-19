@@ -1,6 +1,6 @@
 [project]
 name = "rag7"
-version = "0.7.0"
+version = "0.8.0"
 description = "rag7 — multi-backend retrieval-augmented generation with LangGraph"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -184,20 +184,16 @@ dev = [
     "ruff>=0.15.9",
 ]
 
+# Generic shipped defaults — corpus-agnostic retrieval geometry learned
+# from tuning on German product catalogs. No model names or stage toggles
+# here; override per-deployment in your own gitignored rag7.config.toml.
 [tool.rag7]
-top_k = 10
-retrieval_factor = 5
-rerank_top_n = 3
-rerank_cap_multiplier = 2.904843960174362
-semantic_ratio = 0.5081105348439731
-fusion = "rrf"
-hyde_min_words = 8
-short_query_threshold = 8
+retrieval_factor = 6
+rerank_top_n = 6
+rerank_cap_multiplier = 3.0
+semantic_ratio = 0.4
+fusion = "dbsf"
 short_query_sort_tokens = true
-bm25_fallback_threshold = 0.36667607740510133
-bm25_fallback_semantic_ratio = 0.8004385528669709
-expert_top_n = 10
-expert_threshold = 0.15
-max_iter = 3
-n_swarm_queries = 4
-rerank_chars = 2048
+bm25_fallback_threshold = 0.3
+bm25_fallback_semantic_ratio = 0.77
+rerank_skip_gap = 0.1
