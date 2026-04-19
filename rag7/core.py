@@ -2240,13 +2240,21 @@ class AgenticRAG:
         # token (year/version), or uppercase code. Embedded digits (bm25, oauth2)
         # are technical jargon, not entities — don't count them.
         words = question.strip().split()
-        # Language-agnostic filter-intent words (from/by/without) in
-        # German/French/English. Any occurrence alongside a content word
-        # is a strong filter signal.
+        # Language-agnostic filter-intent words (from/by/without) covering
+        # German, French, Italian, English — the four languages of the
+        # Swiss construction market. Any occurrence alongside a content
+        # word is a strong filter signal.
         _FILTER_INTENT_WORDS = {
-            "von", "aus", "ohne", "nicht", "für", "fur", "bei",
-            "de", "du", "sans", "pour", "par",
-            "from", "without", "not", "for", "by", "of",
+            # German
+            "von", "vom", "aus", "ohne", "nicht", "kein", "keine",
+            "für", "fur", "bei", "mit",
+            # French
+            "de", "du", "des", "sans", "pour", "par", "pas",
+            "avec", "chez",
+            # Italian
+            "di", "da", "del", "della", "senza", "non", "per", "con",
+            # English
+            "from", "without", "not", "no", "for", "by", "of", "with",
         }
         has_capital_signal = any(
             (i > 0 and w and w[0].isupper() and not w.isupper())
