@@ -742,6 +742,11 @@ class AgenticRAG:
 
         self._domain_hint: str = ""
         self._field_values_cache: dict = {}
+        # Snippet length for quality-gate / rewrite / relevance-check LLM
+        # prompts. Auto-configured from sample-doc analysis; short product
+        # rows land around 200–400, long catalog pages / articles around
+        # 1000–2000. Env var as an escape hatch.
+        self._preview_chars: int = int(os.getenv("RAG_PREVIEW_CHARS", "400"))
 
         if auto_strategy:
             self._auto_configure(override_hyde_min_words=hyde_min_words is None)
@@ -871,7 +876,13 @@ class AgenticRAG:
                             "- short_query_threshold: int 3–8 — word count "
                             "below which we skip LLM query preprocessing. "
                             "Lower (3–4) for short keyword catalogs, higher "
-                            "(6–8) for natural-language Q&A corpora."
+                            "(6–8) for natural-language Q&A corpora.\n"
+                            "- preview_chars: int 200–2000 — how many chars "
+                            "of each document to feed the quality-gate and "
+                            "rewrite-snippet LLM calls. Short product rows "
+                            "→ 200–400. Long catalog pages / legal docs / "
+                            "articles → 1000–2000. Based on what a reader "
+                            "would actually need to judge relevance."
                         ),
                         HumanMessage("Sample documents:\n" + "\n---\n".join(previews)),
                     ]
@@ -902,6 +913,13 @@ class AgenticRAG:
                 self._enable_preprocess_llm = bool(config["enable_preprocess_llm"])
             if "short_query_threshold" in config:
                 self._short_query_threshold = int(config["short_query_threshold"])
+            if "preview_chars" in config:
+                try:
+                    self._preview_chars = max(
+                        200, min(4000, int(config["preview_chars"]))
+                    )
+                except (ValueError, TypeError):
+                    pass
             # Token sort is cheap and paraphrase-invariant — always on.
             self._short_query_sort_tokens = True
             label = (
@@ -1879,7 +1897,7 @@ class AgenticRAG:
             return new
 
         if state.quality_ok is False and state.documents:
-            top_snippet = state.documents[0].page_content[:150]
+            top_snippet = state.documents[0].page_content[: self._preview_chars]
             prompt = (
                 "The search returned documents but they are NOT relevant to the question. "
                 f'Previous query: "{state.query}". '
@@ -1972,7 +1990,7 @@ class AgenticRAG:
 
         top_n = min(self.rerank_top_n, len(state.documents))
         snippets = "\n\n".join(
-            f"[{i + 1}] {d.page_content[:400]}"
+            f"[{i + 1}] {d.page_content[: self._preview_chars]}"
             for i, d in enumerate(state.documents[:top_n])
         )
         intent_hint = ""
@@ -2078,7 +2096,7 @@ class AgenticRAG:
         # Iter 1: strict quality assessment — no shortcut.
 
         snippets = "\n\n".join(
-            f"[{i + 1}] {d.page_content[:300]}"
+            f"[{i + 1}] {d.page_content[: self._preview_chars]}"
             for i, d in enumerate(state.documents[:5])
         )
         try:
@@ -2691,7 +2709,9 @@ class AgenticRAG:
                 return RelevanceCheck.model_validate(cached)
             except Exception:
                 pass
-        snippets = "\n---\n".join(d.page_content[:300] for d in docs[:3])
+        snippets = "\n---\n".join(
+            d.page_content[: self._preview_chars] for d in docs[:3]
+        )
         try:
             result = cast(
                 RelevanceCheck,
