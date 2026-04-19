@@ -122,6 +122,7 @@ class RAGConfig(BaseModel):
         treated as Python ``None`` for fields that support it, letting you
         disable optional stages from the environment.
         """
+
         def _env_float_or_none(key: str, default: str) -> float | None:
             raw = os.getenv(key, default)
             return None if raw.lower() == "none" else float(raw)
@@ -142,8 +143,12 @@ class RAGConfig(BaseModel):
             fusion=fusion,  # type: ignore[arg-type]
             hyde_min_words=_env_int_or_none("RAG_HYDE_MIN_WORDS", "8"),
             short_query_threshold=int(os.getenv("RAG_SHORT_QUERY_THRESHOLD", "6")),
-            short_query_sort_tokens=bool(int(os.getenv("RAG_SHORT_QUERY_SORT_TOKENS", "1"))),
-            bm25_fallback_threshold=_env_float_or_none("RAG_BM25_FALLBACK_THRESHOLD", "0.4"),
+            short_query_sort_tokens=bool(
+                int(os.getenv("RAG_SHORT_QUERY_SORT_TOKENS", "1"))
+            ),
+            bm25_fallback_threshold=_env_float_or_none(
+                "RAG_BM25_FALLBACK_THRESHOLD", "0.4"
+            ),
             bm25_fallback_semantic_ratio=float(
                 os.getenv("RAG_BM25_FALLBACK_SEMANTIC_RATIO", "0.9")
             ),

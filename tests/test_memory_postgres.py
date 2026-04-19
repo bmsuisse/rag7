@@ -3,19 +3,29 @@
 import asyncio
 import os
 
+import pytest
 from dotenv import load_dotenv
 
 load_dotenv()
 
 # langchain Azure requires OPENAI_API_VERSION
-os.environ.setdefault("OPENAI_API_VERSION", os.getenv("AZURE_OPENAI_API_VERSION", "2024-12-01-preview"))
+os.environ.setdefault(
+    "OPENAI_API_VERSION",
+    os.getenv("AZURE_OPENAI_API_VERSION", "2024-12-01-preview"),
+)
+
+# Skip the whole module on CI / anywhere Azure env vars are not provided.
+pytestmark = pytest.mark.skipif(
+    not (os.getenv("AZURE_OPENAI_ENDPOINT") and os.getenv("AZURE_OPENAI_API_KEY")),
+    reason="Azure OpenAI env vars (AZURE_OPENAI_ENDPOINT + AZURE_OPENAI_API_KEY) not set",
+)
 
 PG = os.getenv("TEST_PG_URL", "postgresql://postgres:postgres@localhost:5432/rag7test")
-AZURE_ENDPOINT = os.environ["AZURE_OPENAI_ENDPOINT"]
-AZURE_KEY = os.environ["AZURE_OPENAI_API_KEY"]
-AZURE_DEPLOYMENT = os.environ.get("AZURE_OPENAI_DEPLOYMENT", "gpt-5.4-mini")
-AZURE_EMBED = os.environ.get("AZURE_OPENAI_EMBEDDING_DEPLOYMENT", "text-embedding-3-small")
-AZURE_API_VERSION = os.environ.get("AZURE_OPENAI_API_VERSION", "2024-12-01-preview")
+AZURE_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT", "")
+AZURE_KEY = os.getenv("AZURE_OPENAI_API_KEY", "")
+AZURE_DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-5.4-mini")
+AZURE_EMBED = os.getenv("AZURE_OPENAI_EMBEDDING_DEPLOYMENT", "text-embedding-3-small")
+AZURE_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION", "2024-12-01-preview")
 
 AZURE_KWARGS = {
     "api_key": AZURE_KEY,

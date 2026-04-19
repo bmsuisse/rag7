@@ -465,9 +465,7 @@ class AgenticRAG:
             kwargs.update(
                 azure_deployment=spec.split(":", 1)[1],
                 azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
-                api_version=os.getenv(
-                    "AZURE_OPENAI_API_VERSION", "2024-12-01-preview"
-                ),
+                api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-12-01-preview"),
                 api_key=os.getenv("AZURE_OPENAI_API_KEY"),
                 request_timeout=timeout,
             )
@@ -875,9 +873,7 @@ class AgenticRAG:
                             "Lower (3–4) for short keyword catalogs, higher "
                             "(6–8) for natural-language Q&A corpora."
                         ),
-                        HumanMessage(
-                            "Sample documents:\n" + "\n---\n".join(previews)
-                        ),
+                        HumanMessage("Sample documents:\n" + "\n---\n".join(previews)),
                     ]
                 )
                 config = json.loads(str(result.content).strip())
@@ -929,7 +925,12 @@ class AgenticRAG:
         first_doc = sample[0] if sample else {}
 
         def _looks_like_id(field: str) -> bool:
-            return field.lower() in {"id", "_id", "uid", "uuid"} or field.lower().endswith("_id")
+            return field.lower() in {
+                "id",
+                "_id",
+                "uid",
+                "uuid",
+            } or field.lower().endswith("_id")
 
         def _is_string_field(field: str) -> bool:
             v = first_doc.get(field)
@@ -937,16 +938,23 @@ class AgenticRAG:
 
         if not self.name_field:
             # Prefer attributes ending in "_name", else first non-ID string attr.
-            candidates = [a for a in attrs if a.lower().endswith("_name") and _is_string_field(a)]
+            candidates = [
+                a for a in attrs if a.lower().endswith("_name") and _is_string_field(a)
+            ]
             if not candidates:
-                candidates = [a for a in attrs if not _looks_like_id(a) and _is_string_field(a)]
+                candidates = [
+                    a for a in attrs if not _looks_like_id(a) and _is_string_field(a)
+                ]
             if candidates:
                 self.name_field = candidates[0]
 
         if not self.group_field:
             candidates = [
-                a for a in attrs
-                if any(tok in a.lower() for tok in ("group", "category", "class", "type"))
+                a
+                for a in attrs
+                if any(
+                    tok in a.lower() for tok in ("group", "category", "class", "type")
+                )
                 and not _looks_like_id(a)
                 and _is_string_field(a)
             ]
@@ -1530,9 +1538,7 @@ class AgenticRAG:
             # queries like "trockenbeton" match every near-duplicate, killing
             # commercial tiebreaks. Need at least 2 tokens hit AND a majority.
             hits = sum(1 for t in q_tokens if t in top_name)
-            confident = (
-                len(q_tokens) >= 2 and hits >= 2 and hits >= len(q_tokens) // 2
-            )
+            confident = len(q_tokens) >= 2 and hits >= 2 and hits >= len(q_tokens) // 2
         boost = (lambda _: 1.0) if confident else self.boost_fn
         scored = sorted(
             [(docs[i], s * boost(docs[i].metadata)) for i, s in indexed],
@@ -2339,15 +2345,45 @@ class AgenticRAG:
         # Filter-intent tokens (from/by/without) across DE/FR/IT/EN.
         _FILTER_INTENT_WORDS = {
             # German
-            "von", "vom", "aus", "ohne", "nicht", "kein", "keine",
-            "für", "fur", "bei", "mit",
+            "von",
+            "vom",
+            "aus",
+            "ohne",
+            "nicht",
+            "kein",
+            "keine",
+            "für",
+            "fur",
+            "bei",
+            "mit",
             # French
-            "de", "du", "des", "sans", "pour", "par", "pas",
-            "avec", "chez",
+            "de",
+            "du",
+            "des",
+            "sans",
+            "pour",
+            "par",
+            "pas",
+            "avec",
+            "chez",
             # Italian
-            "di", "da", "del", "della", "senza", "non", "per", "con",
+            "di",
+            "da",
+            "del",
+            "della",
+            "senza",
+            "non",
+            "per",
+            "con",
             # English
-            "from", "without", "not", "no", "for", "by", "of", "with",
+            "from",
+            "without",
+            "not",
+            "no",
+            "for",
+            "by",
+            "of",
+            "with",
         }
         has_capital_signal = any(
             (i > 0 and w and w[0].isupper() and not w.isupper())
@@ -2701,11 +2737,7 @@ class AgenticRAG:
         # bm25_fallback_threshold=None disables the fallback entirely.
         effective_semantic_ratio = state.adaptive_semantic_ratio
         fb_th = self._bm25_fallback_threshold
-        if (
-            fb_th is not None
-            and top_score < fb_th
-            and effective_semantic_ratio is None
-        ):
+        if fb_th is not None and top_score < fb_th and effective_semantic_ratio is None:
             effective_semantic_ratio = self._bm25_fallback_semantic_ratio
         broad_docs = await self._asearch(
             state.query,

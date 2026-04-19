@@ -41,21 +41,28 @@ attr_list = {}
 "pymdownx.snippets" = {}
 "pymdownx.tabbed" = { alternate_style = true }
 
-[project.nav]
+[[project.nav]]
 "Home" = "index.md"
+
+[[project.nav]]
 "Quick Start" = "quickstart.md"
 
-[project.nav."Guide"]
-"Backends" = "backends.md"
-"Reranking" = "reranking.md"
-"Filtering" = "filtering.md"
-"Multi-Collection" = "collections.md"
-"Auto Strategy" = "auto-strategy.md"
-"Async & Sync" = "async.md"
-"Tracing & Verbose" = "tracing.md"
-"Memory & Persistence" = "memory.md"
+[[project.nav]]
+Guide = [
+    { "Backends" = "backends.md" },
+    { "Reranking" = "reranking.md" },
+    { "Filtering" = "filtering.md" },
+    { "Multi-Collection" = "collections.md" },
+    { "Auto Strategy" = "auto-strategy.md" },
+    { "Auto-Tuning" = "auto-tuning.md" },
+    { "Async & Sync" = "async.md" },
+    { "Tracing & Verbose" = "tracing.md" },
+    { "Memory & Persistence" = "memory.md" },
+]
 
-[project.nav."Reference"]
-"Configuration" = "configuration.md"
-"Examples" = "examples.md"
-"Changelog" = "changelog.md"
+[[project.nav]]
+Reference = [
+    { "Configuration" = "configuration.md" },
+    { "Examples" = "examples.md" },
+    { "Changelog" = "changelog.md" },
+]
