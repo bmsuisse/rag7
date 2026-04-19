@@ -96,6 +96,7 @@ This is the difference between a search box and a field agent.
 - ⚡ **One-line init** — `init_agent("docs", model="openai:gpt-5.4", backend="qdrant")` — no imports needed
 - 💬 **Multi-turn chat** — conversation history with citation-aware answers
 - 🎯 **Auto-strategy** — LLM samples your collection and tunes itself automatically
+- 🏎️ **Optuna auto-tuner** — 20+ retrieval knobs tuned to YOUR corpus in ~5 min; `None` as first-class value for disabling stages. [Full guide](docs/auto-tuning.md) · [Quick jump](#-tune-it-for-your-data)
 - 🔄 **Async-native** — every operation has a sync and async variant
 
 ---
@@ -1181,12 +1182,24 @@ found by running the built-in tuner against real German/Swiss product catalog
 data. These are better than hand-picked defaults for most retrieval tasks.
 
 For peak performance on **your** corpus (product vs. legal vs. support vs.
-scientific), run the tuner yourself — it searches the config space with
-[Optuna](https://optuna.org) and usually beats defaults by 5–15% on hit@5.
+scientific), run the tuner yourself — it searches 20+ knobs with
+[Optuna](https://optuna.org) TPE sampler and usually beats defaults by 3–10%
+combined score (hit@5 + paraphrase consistency).
 
-> 📘 **Full walkthrough:** [`docs/auto-tuning.md`](docs/auto-tuning.md) covers
-> testset design, CLI and Python API, every searched parameter (scalar +
-> None-able + stage toggles), result interpretation, and troubleshooting.
+**Real benchmark** (Meilisearch cloud, 3 German product-catalog indexes, 39
+hit cases + 8 paraphrase groups):
+
+| Config | hit@5 | consistency | stable_top1 | combined |
+|--------|------:|------------:|------------:|---------:|
+| Library defaults | 0.903 | 0.750 | 0.250 | 0.727 |
+| Shipped tuned (`[tool.rag7]`) | 0.968 | 0.792 | 0.250 | **0.761** |
+| Full corpus-tuned (local) | **0.968** | **0.792** | **0.375** | **0.761** |
+
+`combined = hit@5×0.4 + consistency×0.35 + stable_top1×0.25`
+
+> 📘 **Full walkthrough:** [`docs/auto-tuning.md`](docs/auto-tuning.md) — testset
+> design, CLI and Python API, every searched parameter, result interpretation,
+> troubleshooting.
 
 ### 1. Install
 
@@ -1207,6 +1220,21 @@ A list of `(query, expected_doc_ids, id_field)` tuples — or a JSON file:
 
 ### 3. Run the tuner
 
+**CLI (fastest path):**
+
+```bash
+python -m rag7.tuner \
+  --index my_index \
+  --hits testset.json \
+  --trials 50 \
+  --patience 8         # early-stop if 8 trials show no improvement
+```
+
+Use `--pyproject` to write to `pyproject.toml [tool.rag7]` instead of the
+gitignored `rag7.config.toml`.
+
+**Python API (full control):**
+
 ```python
 from rag7 import MeilisearchBackend, RAGConfig
 from rag7.tuner import RAGTuner, load_testset
@@ -1217,9 +1245,16 @@ tuner = RAGTuner(
     embed_fn=_make_azure_embed_fn(),
     hit_cases=load_testset("testset.json"),
     eval_k=5,
+    # Optional: let the tuner mix/match weak + thinking models across
+    # cost tiers (gen_llm / strong_model stays fixed — quality-critical).
+    candidate_models=["azure:gpt-5.4-mini", "azure:gpt-5.4-nano"],
 )
 
-best = tuner.tune(n_trials=50)
+best = tuner.tune(
+    n_trials=50,
+    patience=8,             # early-stop on plateau
+    trial_timeout_s=120,    # hung trials score 0, never block the study
+)
 best.save_toml("rag7.config.toml")   # gitignored — local override (recommended)
 # or: best.save_pyproject()          # [tool.rag7] — commit if your team shares tuning
 ```
@@ -1266,6 +1301,7 @@ rag = AgenticRAG(
 | `short_query_sort_tokens` | bool | Sort tokens for paraphrase invariance |
 | `bm25_fallback_semantic_ratio` | 0.7–1.0 | Semantic ratio used when BM25 fails |
 | `rerank_skip_gap` | 0.05–0.3 | Top-1 vs top-5 score gap to skip reranker |
+| `name_field_boost_max` | 0.0–0.5 | Post-rerank boost for docs matching query tokens in `name_field`. Higher → precise lookups win; lower → paraphrase stability. |
 
 **Optional (`None` = disable stage, first-class tuning option):**
 
@@ -1286,7 +1322,19 @@ rag = AgenticRAG(
 | `enable_filter_intent` | `true` | LLM detects filter intent from query |
 | `enable_quality_gate` | `true` | LLM judges retrieval quality before answering |
 | `enable_preprocess_llm` | `true` | LLM query rewrite + variant generation |
-| `enable_reasoning` | `false` | Per-document relevance reasoning |
+| `enable_reasoning` | `true` | Per-document relevance reasoning (uses `thinking_model`) |
+
+**LLM tiers (cost ⇄ quality, mix and match):**
+
+| Parameter | Role | Typical cheap pick |
+|-----------|------|--------------------|
+| `strong_model` | Final cited answer — gen_llm | `azure:gpt-5.4` |
+| `weak_model` | Preprocess / quality / filter-intent / rewrite | `azure:gpt-5.4-mini` |
+| `thinking_model` | Per-document reasoning when `enable_reasoning=true` | `azure:gpt-5.4-mini` |
+
+Specs are `provider:model` — resolved via LangChain's `init_chat_model`, so
+every supported provider works (`azure:`, `openai:`, `anthropic:`,
+`bedrock:`, `ollama:`, etc.). `None` = inherit from env vars.
 
 Optuna's TPE sampler learns from prior trials — **50 trials usually beats
 hand-tuning**. The tuner explores *disabling* each optional stage as a
