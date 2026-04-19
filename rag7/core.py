@@ -1328,9 +1328,25 @@ class AgenticRAG:
 
     async def _aparallel_start(self, state: RAGState) -> RAGState:
         t0 = time.perf_counter()
+        # When there's no history, contextualize is a no-op and the question
+        # won't be rewritten — so we can kick off filter-intent detection
+        # against the original question in parallel with preprocess, avoiding
+        # a serial LLM hop in _aretrieve_node. With history, contextualize may
+        # rewrite the question, so we must wait before triggering filter-intent.
+        intent_task: asyncio.Task[FilterIntent] | None = None
+        if not state.history and state.filter_intent is None:
+            intent_task = asyncio.create_task(
+                self._adetect_filter_intent(state.question)
+            )
         state = await self._acontextualize(state)
         state = await self._aroute_collections(state)
         state = await self._apreprocess(state)
+        if intent_task is not None:
+            try:
+                intent = await intent_task
+            except Exception:
+                intent = FilterIntent(field=None, value="", operator="")
+            state = state.model_copy(update={"filter_intent": intent})
         if state.alternative_to:
             _, docs = await self._aalternative_retrieve(
                 state.query, state.alternative_to, self.top_k
@@ -1445,7 +1461,9 @@ class AgenticRAG:
         if state.iterations == 0:
             broad_docs, (intent, filter_docs) = await asyncio.gather(
                 broad_coro,
-                self._afilter_search_with_intent(state.question, state.query),
+                self._afilter_search_with_intent(
+                    state.question, state.query, precomputed=intent
+                ),
             )
             if filter_docs and len(filter_docs) >= self.top_k:
                 docs = filter_docs
@@ -1474,9 +1492,14 @@ class AgenticRAG:
         return new
 
     async def _afilter_search_with_intent(
-        self, question: str, query: str
+        self,
+        question: str,
+        query: str,
+        precomputed: FilterIntent | None = None,
     ) -> tuple[FilterIntent | None, list[Document]]:
-        intent = await self._adetect_filter_intent(question)
+        # Reuse an intent already detected upstream (e.g. in _aparallel_start)
+        # to skip the duplicate LLM classification call.
+        intent = precomputed or await self._adetect_filter_intent(question)
         if not intent.field or not intent.value or not intent.operator:
             return None, []
         docs = await self._afilter_search_from_intent(query, intent)
@@ -2385,17 +2408,27 @@ class AgenticRAG:
             "of",
             "with",
         }
-        has_capital_signal = any(
-            (i > 0 and w and w[0].isupper() and not w.isupper())
-            or (w and w[0].isdigit())
-            or (len(w) >= 3 and w.isupper())
+        # Strong signals: numeric tokens (years/sizes/IDs), all-caps codes (M12, SDS).
+        # Weak signal: mid-sentence capitalized words — unreliable for German where
+        # every noun is capitalized, so only count as a signal for 4+ word queries.
+        has_strong_signal = any(
+            (w and w[0].isdigit()) or (len(w) >= 3 and w.isupper()) for w in words
+        )
+        has_weak_capital_signal = any(
+            i > 0 and w and w[0].isupper() and not w.isupper()
             for i, w in enumerate(words)
         )
         has_filter_word = any(w.lower() in _FILTER_INTENT_WORDS for w in words)
-        # Run LLM when we have a clear signal OR the query is long enough
-        # (4+ words) that lowercase brand/entity mentions are likely.
-        # Under 4 words without signals → keyword bag, skip LLM.
-        if not (has_capital_signal or has_filter_word or len(words) >= 4):
+        # Short queries (≤3 words) without an explicit filter-intent word
+        # ("von"/"ohne"/"from"/"without"/…) are almost always keyword bags —
+        # users dropping "Bosch Winkelschleifer 125mm" aren't asking for a
+        # brand filter, they want that product. Skip the LLM classifier.
+        # 4+ word queries may contain lowercase brand mentions in natural prose,
+        # so we still run the LLM when there's some entity-like signal.
+        if len(words) <= 3:
+            if not has_filter_word:
+                return FilterIntent(field=None, value="", operator="")
+        elif not (has_strong_signal or has_weak_capital_signal or has_filter_word):
             return FilterIntent(field=None, value="", operator="")
 
         cached = _cache.load("filter-intent-v5", tuple(filterable), question)
@@ -2718,19 +2751,30 @@ class AgenticRAG:
             state = await self._arerank(state)
             return state.query, state.documents[:k]
 
-        # Slow path: full smart retrieve (preprocess + HyDE + filter-intent concurrent).
+        # Slow path: fan out preprocess, HyDE, filter-intent AND broad search in
+        # parallel. Broad search uses the raw query/question — when preprocess
+        # returns an LLM-refined query, we lose that refinement for broad search,
+        # but when enable_preprocess_llm is False (common) the preprocessed query
+        # is just stop-word-stripped, so we prepend that as an extra_bm25 variant
+        # via query_variants after the fact. This avoids waiting on the
+        # filter-intent LLM call (often ~1-3s) before broad search can start.
         init = RAGState(question=query, query=query)
-        (state, hyde_text, (_, filter_docs)) = await asyncio.gather(
-            self._apreprocess(init),
-            self._acompute_hyde(query),
-            self._afilter_search_with_intent(query, query),
+        filter_intent_task = asyncio.create_task(
+            self._afilter_search_with_intent(query, query)
         )
+        preprocess_task = asyncio.create_task(self._apreprocess(init))
+        hyde_task = asyncio.create_task(self._acompute_hyde(query))
+        state = await preprocess_task
 
         # Alternative path: preprocess detected "find alternatives for X".
         if state.alternative_to:
+            filter_intent_task.cancel()
+            hyde_task.cancel()
             return await self._aalternative_retrieve(
                 state.query, state.alternative_to, k
             )
+
+        hyde_text = await hyde_task
 
         # When BM25 completely fails (typo / transliteration / no keyword match),
         # fall back to near-pure semantic search to recover recall.
@@ -2748,6 +2792,26 @@ class AgenticRAG:
             adaptive_fusion=state.adaptive_fusion,
             hyde_text=hyde_text,
         )
+        # Use filter-intent results when they're already ready (free recall boost),
+        # otherwise cancel the in-flight LLM classification so rerank isn't blocked
+        # by its slow tail. Broad search alone already returns top_k candidates —
+        # filter_docs primarily add recall in ambiguous queries, which is less
+        # critical when broad_docs is fully populated.
+        filter_docs: list[Document] = []
+        if filter_intent_task.done():
+            try:
+                _, filter_docs = filter_intent_task.result()
+            except Exception:
+                pass
+        elif len(broad_docs) < k:
+            # Broad search came back thin — wait for the filter branch to
+            # potentially rescue recall.
+            try:
+                _, filter_docs = await filter_intent_task
+            except Exception:
+                pass
+        else:
+            filter_intent_task.cancel()
         docs = (
             self._merge_doc_lists(filter_docs, broad_docs)
             if filter_docs
