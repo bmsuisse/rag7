@@ -177,3 +177,6 @@ skills-lock.json
 
 # Local tuned config (per-deployment, not shipped)
 rag7.config.toml
+
+# Local benchmark artifacts
+/bench
