@@ -332,7 +332,7 @@ class RAGTuner:
                         self._score_config(config), timeout=trial_timeout_s
                     )
                 )
-            except (asyncio.TimeoutError, Exception) as e:
+            except Exception as e:
                 trial.set_user_attr("error", type(e).__name__)
                 return 0.0
             trial.set_user_attr("hit_rate", result.hit_rate)
@@ -454,19 +454,15 @@ def _cli_main() -> None:
         default=[],
         metavar="PROVIDER:MODEL",
         help=(
-            "Candidate LLM specs the tuner may choose between for both "
-            "gen_model and llm_model. Example: "
+            "Candidate LLM specs the tuner may pick between for the weak / "
+            "thinking (and optionally strong) tiers. Example: "
             "--models azure:gpt-5.4 azure:gpt-5.4-mini azure:gpt-5.4-nano"
         ),
     )
     args = parser.parse_args()
 
-    try:
-        from .backend import MeilisearchBackend
-        from .utils import _make_azure_embed_fn
-    except ImportError as exc:
-        print(f"Missing dependency: {exc}", file=sys.stderr)
-        sys.exit(1)
+    from .backend import MeilisearchBackend
+    from .utils import _make_azure_embed_fn
 
     hits = load_testset(args.hits)
     print(f"Loaded {len(hits)} hit cases from {args.hits}")

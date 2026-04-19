@@ -118,13 +118,17 @@ async def main() -> None:
     avg_consistency = consistency_sum / consistency_groups if consistency_groups else 0.0
     avg_stable = stable_sum / consistency_groups if consistency_groups else 0.0
 
+    avg_query_latency_ms = (
+        elapsed / grand_total * 1000 if grand_total else 0.0
+    )
     print("\n════════════════════════════════════════════════════════════")
-    print(f"eval_v2 summary: {elapsed:.1f}s")
+    print(f"eval_v2 summary: {elapsed:.1f}s total")
     if grand_total:
         print(f"  adversarial+synthetic hit@5: {grand_hits}/{grand_total} = "
               f"{grand_hits / grand_total:.4f}")
     print(f"  paraphrase consistency:      {avg_consistency:.4f}")
     print(f"  paraphrase stable_top1:      {avg_stable:.4f}")
+    print(f"  avg query latency:           {avg_query_latency_ms:.0f}ms")
     print("════════════════════════════════════════════════════════════")
 
 
