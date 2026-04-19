@@ -1184,6 +1184,10 @@ For peak performance on **your** corpus (product vs. legal vs. support vs.
 scientific), run the tuner yourself — it searches the config space with
 [Optuna](https://optuna.org) and usually beats defaults by 5–15% on hit@5.
 
+> 📘 **Full walkthrough:** [`docs/auto-tuning.md`](docs/auto-tuning.md) covers
+> testset design, CLI and Python API, every searched parameter (scalar +
+> None-able + stage toggles), result interpretation, and troubleshooting.
+
 ### 1. Install
 
 ```bash
@@ -1238,16 +1242,18 @@ rag = AgenticRAG(
 ### Config discovery order
 
 1. **Runtime kwarg** — `AgenticRAG(config=RAGConfig(...))`
-2. **`[tool.rag7]` in `pyproject.toml`** — matches ruff/black/mypy convention.
-   `rag7` ships with curated defaults here; override or delete the block to
-   fall through to your own tuning.
-3. **`rag7.config.toml`** — per-deployment tuning. **Gitignored by default**
-   because values here are corpus-specific. This is the recommended place for
-   your own tuned config unless your whole team uses the same data.
+2. **`rag7.config.toml`** — per-deployment local override. **Gitignored by
+   default** so your corpus-specific tuning doesn't leak into source control.
+   Wins over pyproject defaults — drop a tuned file here and you're done.
+3. **`[tool.rag7]` in `pyproject.toml`** — shipped / shared defaults.
+   `rag7` ships with curated values here (tuned on real product-catalog data).
+   Matches ruff/black/mypy convention for committed tool config.
 4. **`RAG_*` env vars** — containers/CI overrides.
 5. **Library defaults** — fallback if nothing else is set.
 
 ### What gets tuned
+
+**Scalar thresholds:**
 
 | Parameter | Range | Effect |
 |-----------|-------|--------|
@@ -1258,13 +1264,50 @@ rag = AgenticRAG(
 | `fusion` | `rrf` / `dbsf` | Score fusion strategy |
 | `short_query_threshold` | 3–8 | When to skip LLM preprocessing |
 | `short_query_sort_tokens` | bool | Sort tokens for paraphrase invariance |
-| `bm25_fallback_threshold` | 0.2–0.6 | When weak BM25 triggers semantic boost |
-| `bm25_fallback_semantic_ratio` | 0.7–1.0 | Boost target ratio |
-| `expert_threshold` | 0.05–0.3 | Expert reranker escalation |
+| `bm25_fallback_semantic_ratio` | 0.7–1.0 | Semantic ratio used when BM25 fails |
+| `rerank_skip_gap` | 0.05–0.3 | Top-1 vs top-5 score gap to skip reranker |
+
+**Optional (`None` = disable stage, first-class tuning option):**
+
+| Parameter | Range / None | Effect |
+|-----------|--------------|--------|
+| `bm25_fallback_threshold` | 0.2–0.6 / `None` | BM25 score below which we boost semantic. `None` = never boost. |
+| `fast_accept_score` | 0.5–0.95 / `None` | BM25 score to accept fast path. `None` = always slow path. |
+| `fast_accept_confidence` | 0.6–0.95 / `None` | LLM confidence to accept fast path. `None` = no LLM confirm. |
+| `rerank_skip_dominance` | 0.6–0.95 / `None` | Score to skip reranker on obvious hits. `None` = always rerank. |
+| `expert_threshold` | 0.05–0.3 / `None` | Gap to escalate to expert reranker. `None` = never escalate. |
+| `hyde_min_words` | 2–20 / `None` | Min words to trigger HyDE. `None` = disable HyDE. |
+
+**Pipeline-stage toggles:**
+
+| Parameter | Default | Effect |
+|-----------|---------|--------|
+| `enable_hyde` | `true` | Hypothetical-document expansion |
+| `enable_filter_intent` | `true` | LLM detects filter intent from query |
+| `enable_quality_gate` | `true` | LLM judges retrieval quality before answering |
+| `enable_preprocess_llm` | `true` | LLM query rewrite + variant generation |
+| `enable_reasoning` | `false` | Per-document relevance reasoning |
 
 Optuna's TPE sampler learns from prior trials — **50 trials usually beats
-hand-tuning**. Use a cheap LLM (e.g. `gpt-4o-mini`) during tuning to keep cost
-down; swap to your production LLM afterwards.
+hand-tuning**. The tuner explores *disabling* each optional stage as a
+first-class hypothesis, so it can discover e.g. "your corpus doesn't need
+filter-intent detection." Use a cheap LLM (`gpt-4o-mini`) during tuning to
+keep cost down; swap to production LLM afterwards.
+
+### Disabling stages in TOML
+
+TOML has no `null`, so disabled fields go in a `disable` list:
+
+```toml
+[tool.rag7]
+top_k = 10
+semantic_ratio = 0.5
+# disable these optional stages for this corpus:
+disable = ["bm25_fallback_threshold", "expert_threshold"]
+```
+
+`RAGConfig.from_toml()` / `from_pyproject()` translates `disable = [...]`
+into `None` values on load.
 
 ---
 

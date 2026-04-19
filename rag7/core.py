@@ -85,6 +85,35 @@ _CATEGORY_FIELD_PATTERN = re.compile(
 )
 
 
+def _auto_cache_path(schema_sig: str) -> "os.PathLike[str]":
+    from pathlib import Path
+
+    base = Path.home() / ".cache" / "rag7"
+    base.mkdir(parents=True, exist_ok=True)
+    return base / f"auto_{schema_sig}.json"
+
+
+def _auto_cache_load(schema_sig: str) -> dict[str, Any] | None:
+    try:
+        from pathlib import Path
+
+        p = Path(_auto_cache_path(schema_sig))
+        if not p.is_file():
+            return None
+        return json.loads(p.read_text())
+    except Exception:
+        return None
+
+
+def _auto_cache_save(schema_sig: str, config: dict[str, Any]) -> None:
+    try:
+        from pathlib import Path
+
+        Path(_auto_cache_path(schema_sig)).write_text(json.dumps(config, indent=2))
+    except Exception:
+        pass
+
+
 def _detect_category_fields(backend: SearchBackend) -> list[str]:
     """Heuristic: find metadata fields likely to encode a category/group.
 
@@ -411,6 +440,40 @@ class AgenticRAG:
         )
 
     @staticmethod
+    def _resolve_llm(spec: str, timeout: int = 30) -> BaseChatModel:
+        """Build an LLM from a ``provider:model`` spec via langchain's
+        ``init_chat_model`` — supports every langchain chat provider.
+
+        We accept the short ``"azure:gpt-5.4"`` form alongside langchain's
+        canonical ``"azure_openai:gpt-5.4"`` for ergonomics. For Azure, the
+        model portion is passed as the deployment name.
+
+        Examples:
+            ``"azure:gpt-5.4"``      → AzureChatOpenAI (AZURE_OPENAI_* env)
+            ``"azure:gpt-5.4-mini"`` → same, with a smaller deployment
+            ``"openai:gpt-4o-mini"`` → ChatOpenAI
+            ``"anthropic:claude-haiku-4-5"`` → ChatAnthropic
+        """
+        from langchain.chat_models import init_chat_model
+
+        # Normalize our short "azure:..." to langchain's "azure_openai:..."
+        if spec.startswith("azure:"):
+            spec = "azure_openai:" + spec.split(":", 1)[1]
+
+        kwargs: dict[str, Any] = {"temperature": 0}
+        if spec.startswith("azure_openai:"):
+            kwargs.update(
+                azure_deployment=spec.split(":", 1)[1],
+                azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
+                api_version=os.getenv(
+                    "AZURE_OPENAI_API_VERSION", "2024-12-01-preview"
+                ),
+                api_key=os.getenv("AZURE_OPENAI_API_KEY"),
+                request_timeout=timeout,
+            )
+        return init_chat_model(spec, **kwargs)  # type: ignore[return-value]
+
+    @staticmethod
     def _default_reranker() -> CohereReranker | LLMReranker:
         """Create default reranker: Cohere if available, else LLM-based."""
         try:
@@ -587,8 +650,29 @@ class AgenticRAG:
                 filter = base_filter
         self.filter = filter
 
-        self._llm = llm or self._default_llm()
-        self._gen_llm = gen_llm or self._default_gen_llm()
+        # Resolve LLMs into three tiers — strong (gen / rewrite), weak (cheap
+        # high-frequency calls), thinking (reasoning). Explicit kwargs win over
+        # config specs, which win over env defaults.
+        if gen_llm is not None:
+            self._gen_llm = gen_llm
+        elif config is not None and config.strong_model:
+            self._gen_llm = self._resolve_llm(config.strong_model, timeout=60)
+        else:
+            self._gen_llm = self._default_gen_llm()
+        if llm is not None:
+            self._llm = llm
+        elif config is not None and config.weak_model:
+            self._llm = self._resolve_llm(config.weak_model, timeout=30)
+        else:
+            self._llm = self._default_llm()
+        # Thinking tier: separate instance when explicitly configured, else
+        # fall back to the weak _llm (current behavior, backward compatible).
+        if config is not None and config.thinking_model:
+            self._thinking_llm: BaseChatModel = self._resolve_llm(
+                config.thinking_model, timeout=60
+            )
+        else:
+            self._thinking_llm = self._llm
         self._reranker = reranker or self._default_reranker()
         self._expert_reranker = expert_reranker
         self.expert_top_n = expert_top_n or int(os.getenv("RAG_EXPERT_TOP_N", "10"))
@@ -605,13 +689,25 @@ class AgenticRAG:
             self._rerank_cap_multiplier = config.rerank_cap_multiplier
             self.semantic_ratio = config.semantic_ratio
             self.fusion = config.fusion
-            self.hyde_min_words = config.hyde_min_words
+            self.hyde_min_words = config.hyde_min_words or 999  # None disables HyDE
             self._short_query_threshold = config.short_query_threshold
             self._short_query_sort_tokens = config.short_query_sort_tokens
             self._bm25_fallback_threshold = config.bm25_fallback_threshold
             self._bm25_fallback_semantic_ratio = config.bm25_fallback_semantic_ratio
+            self._fast_accept_score = config.fast_accept_score
+            self._fast_accept_confidence = config.fast_accept_confidence
+            self._rerank_skip_dominance = config.rerank_skip_dominance
+            self._rerank_skip_gap = config.rerank_skip_gap
             self.expert_top_n = config.expert_top_n
             self.expert_threshold = config.expert_threshold
+            self._name_field_boost_max = config.name_field_boost_max
+            self._enable_hyde = config.enable_hyde
+            self._enable_filter_intent = config.enable_filter_intent
+            self._enable_reasoning = config.enable_reasoning
+            self._enable_quality_gate = config.enable_quality_gate
+            self._enable_preprocess_llm = config.enable_preprocess_llm
+            self._rerank_timeout_s = config.rerank_timeout_s
+            self._llm_timeout_s = config.llm_timeout_s
             self.max_iter = config.max_iter
             self.n_swarm_queries = config.n_swarm_queries
             self.rerank_chars = config.rerank_chars
@@ -630,6 +726,20 @@ class AgenticRAG:
             )
             self._bm25_fallback_semantic_ratio = float(
                 os.getenv("RAG_BM25_FALLBACK_SEMANTIC_RATIO", "0.9")
+            )
+            self._fast_accept_score: float | None = 0.85
+            self._fast_accept_confidence: float | None = 0.9
+            self._rerank_skip_dominance: float | None = 0.85
+            self._rerank_skip_gap: float = 0.1
+            self._enable_hyde = True
+            self._enable_filter_intent = True
+            self._enable_reasoning = True
+            self._enable_quality_gate = True
+            self._enable_preprocess_llm = True
+            self._rerank_timeout_s = 30.0
+            self._llm_timeout_s = 60.0
+            self._name_field_boost_max: float = float(
+                os.getenv("RAG_NAME_FIELD_BOOST_MAX", "0.1")
             )
 
         self._domain_hint: str = ""
@@ -656,7 +766,7 @@ class AgenticRAG:
         self._relevance_chain = self._llm.with_structured_output(
             RelevanceCheck, method="json_schema"
         )
-        self._reasoning_chain = self._llm.with_structured_output(
+        self._reasoning_chain = self._thinking_llm.with_structured_output(
             ReasoningVerdict, method="json_schema"
         )
 
@@ -688,9 +798,15 @@ class AgenticRAG:
         self.filter = value
 
     def _auto_configure(self, override_hyde_min_words: bool = True) -> None:
+        """Sample the corpus, then ask an LLM to pick retrieval strategy.
+
+        Results are cached at ``~/.cache/rag7/auto_<schema-hash>.json``
+        keyed by the index schema shape, so subsequent initialisations
+        against the same corpus skip the LLM call entirely.
+        """
         try:
             sample = self.backend.sample_documents(
-                limit=5,
+                limit=15,
                 filter_expr=self.filter,
             )
             if not sample:
@@ -708,35 +824,158 @@ class AgenticRAG:
 
             if max_doc_chars > self.rerank_chars:
                 self.rerank_chars = min(8192, int(max_doc_chars * 1.2))
-            result = self._llm.invoke(
-                [
-                    SystemMessage(
-                        "Analyze these sample documents and return ONLY a JSON object (no markdown) with:\n"
-                        "- hyde_style_hint: str — one short phrase for HyDE prompt, e.g. "
-                        "'German legal ruling', 'product spec sheet', 'customer address record', "
-                        "'Wikipedia article', 'medical Q&A'\n"
-                        "- hyde_min_words: int 3–12 — min query words to trigger HyDE expansion. "
-                        "Lower (3–5) for factual Q&A / legal where even short questions need expansion. "
-                        "Higher (8–12) for keyword search / products where short queries are already precise.\n"
-                        "- domain_hint: str — 1-2 sentences describing what kind of content is stored, "
-                        "what identifiers or codes exist (e.g. article numbers, case IDs), what language "
-                        "the content is in, and any query preprocessing tips specific to this domain "
-                        "(e.g. verb-to-noun normalisation for German product queries, case number format, "
-                        "medical abbreviations). Leave empty string if no domain-specific tips apply."
-                    ),
-                    HumanMessage("Sample documents:\n" + "\n---\n".join(previews)),
-                ]
-            )
-            config = json.loads(str(result.content).strip())
+
+            # Auto-detect the primary name/group fields from the backend's
+            # searchable_attributes ordering. This powers the rerank boost
+            # that promotes docs matching the query in their name_field
+            # over docs that only match in category/group fields.
+            self._infer_name_and_group_fields(sample)
+
+            # Cache by schema shape — same index + same doc keys ≈ same strategy.
+            schema_sig = self._schema_signature(sample)
+            cached = _auto_cache_load(schema_sig)
+            if cached is not None:
+                config = cached
+                source = "cache"
+            else:
+                result = self._llm.invoke(
+                    [
+                        SystemMessage(
+                            "Analyze these sample documents and return ONLY a JSON "
+                            "object (no markdown) with the following keys:\n"
+                            "- hyde_style_hint: str — one short phrase for HyDE "
+                            "prompt, e.g. 'German legal ruling', 'product spec "
+                            "sheet', 'customer address record', 'medical Q&A'.\n"
+                            "- hyde_min_words: int 3–12 — min query words to "
+                            "trigger HyDE. Lower (3–5) for factual Q&A / legal. "
+                            "Higher (8–12) for keyword search / products.\n"
+                            "- domain_hint: str — 1–2 sentences describing the "
+                            "content, identifiers/codes, language, and any "
+                            "query preprocessing tips specific to this domain.\n"
+                            "- semantic_ratio: float 0.3–0.9 — BM25 vs vector "
+                            "balance. Lower (0.3–0.5) for precise keyword/SKU "
+                            "search. Higher (0.6–0.9) for prose, Q&A, synonym-"
+                            "heavy content.\n"
+                            "- fusion: 'rrf' | 'dbsf' — rank fusion strategy. "
+                            "'rrf' is stable default; 'dbsf' normalises score "
+                            "distributions and often wins when score ranges "
+                            "differ (vector vs BM25 scale mismatch).\n"
+                            "- enable_filter_intent: bool — true if schema has "
+                            "real filterable fields (supplier, category, year) "
+                            "that users would naturally mention in questions. "
+                            "False for pure text blobs where filter detection "
+                            "is just noise.\n"
+                            "- enable_preprocess_llm: bool — true if queries "
+                            "in this domain benefit from LLM rewrite (natural "
+                            "language questions, long/complex Q&A). False for "
+                            "short keyword/product-name lookups where rewrite "
+                            "usually introduces noise.\n"
+                            "- short_query_threshold: int 3–8 — word count "
+                            "below which we skip LLM query preprocessing. "
+                            "Lower (3–4) for short keyword catalogs, higher "
+                            "(6–8) for natural-language Q&A corpora."
+                        ),
+                        HumanMessage(
+                            "Sample documents:\n" + "\n---\n".join(previews)
+                        ),
+                    ]
+                )
+                config = json.loads(str(result.content).strip())
+                _auto_cache_save(schema_sig, config)
+                source = "llm"
+
             if "hyde_style_hint" in config:
                 self.hyde_style_hint = str(config["hyde_style_hint"])
             if "hyde_min_words" in config and override_hyde_min_words:
                 self.hyde_min_words = int(config["hyde_min_words"])
             if "domain_hint" in config:
                 self._domain_hint = str(config["domain_hint"])
-            print(f"  [{self.index}] strategy: {config}")
+            if "semantic_ratio" in config:
+                self.semantic_ratio = float(config["semantic_ratio"])
+            if "fusion" in config and config["fusion"] in ("rrf", "dbsf"):
+                self.fusion = config["fusion"]
+            # Post-LLM heuristic: when vector weight is meaningful, DBSF's
+            # distribution-based normalization beats RRF — BM25 and vector
+            # score ranges differ too much for rank-only fusion to handle
+            # well. LLM tends to default to 'rrf'; correct that here.
+            if self.semantic_ratio >= 0.35:
+                self.fusion = "dbsf"
+            if "enable_filter_intent" in config:
+                self._enable_filter_intent = bool(config["enable_filter_intent"])
+            if "enable_preprocess_llm" in config:
+                self._enable_preprocess_llm = bool(config["enable_preprocess_llm"])
+            if "short_query_threshold" in config:
+                self._short_query_threshold = int(config["short_query_threshold"])
+            # Belt-and-braces: always keep short-query token sort on. It's
+            # cheap, paraphrase-invariant, and helps more than it hurts
+            # even when the LLM preprocess is also active.
+            self._short_query_sort_tokens = True
+            print(f"  [{self.index}] strategy ({source}): {config}")
         except Exception as e:
             print(f"  [{self.index}] auto-strategy failed ({e}), using defaults")
+
+    def _infer_name_and_group_fields(self, sample: list[dict]) -> None:
+        """Pick the primary name_field / group_field using the backend's
+        attribute priority + sample-doc heuristics.
+
+        ``name_field`` is the highest-priority string attribute that looks
+        like a human-readable identifier (typically ``*_name`` or the
+        first non-ID searchable attr). ``group_field`` is the first attr
+        matching group/category/class naming.
+
+        Backends like Meilisearch list searchable_attributes in priority
+        order, so the first informative string wins. For other backends
+        the list is unordered; the heuristic still picks sensible defaults.
+        """
+        if self.name_field and self.group_field:
+            return
+        try:
+            raw = self.backend.get_index_config().searchable_attributes
+        except Exception:
+            raw = []
+        attrs = [a.split(":", 1)[0] for a in raw if a and not a.startswith("*")]
+        first_doc = sample[0] if sample else {}
+
+        def _looks_like_id(field: str) -> bool:
+            return field.lower() in {"id", "_id", "uid", "uuid"} or field.lower().endswith("_id")
+
+        def _is_string_field(field: str) -> bool:
+            v = first_doc.get(field)
+            return isinstance(v, str) and len(v.strip()) > 0
+
+        if not self.name_field:
+            # Prefer attributes ending in "_name", else first non-ID string attr.
+            candidates = [a for a in attrs if a.lower().endswith("_name") and _is_string_field(a)]
+            if not candidates:
+                candidates = [a for a in attrs if not _looks_like_id(a) and _is_string_field(a)]
+            if candidates:
+                self.name_field = candidates[0]
+
+        if not self.group_field:
+            candidates = [
+                a for a in attrs
+                if any(tok in a.lower() for tok in ("group", "category", "class", "type"))
+                and not _looks_like_id(a)
+                and _is_string_field(a)
+            ]
+            if candidates:
+                self.group_field = candidates[0]
+
+    def _schema_signature(self, sample: list[dict]) -> str:
+        """Stable hash of index + doc shape + filterable attributes.
+
+        Same corpus → same signature → same cache hit. Changes only when
+        the schema itself changes (new fields, new index, etc.).
+        """
+        import hashlib
+
+        doc_keys = sorted({k for d in sample[:5] for k in d.keys()})
+        try:
+            filterable = sorted(self.backend.get_index_config().filterable_attributes)
+        except Exception:
+            filterable = []
+        raw = f"{self.index}|{','.join(doc_keys)}|{','.join(filterable)}"
+        return hashlib.sha1(raw.encode()).hexdigest()[:12]
 
     def _sys(self, prompt: str) -> SystemMessage:
         if self.instructions:
@@ -826,6 +1065,20 @@ class AgenticRAG:
 
     async def _apreprocess(self, state: RAGState) -> RAGState:
         t0 = time.perf_counter()
+        # Fully-disabled preprocess short-circuits to the raw question with
+        # stop-word stripping only — no LLM call, no token sort, no variants.
+        if not self._enable_preprocess_llm:
+            raw = _strip_stop_words(state.question) or state.question
+            new = state.model_copy(
+                update={
+                    "query": raw,
+                    "query_variants": [],
+                    "adaptive_semantic_ratio": None,
+                    "adaptive_fusion": None,
+                }
+            )
+            self._trace(new, "preprocess", t0, path="disabled", query=raw)
+            return new
         # Short, keyword-like questions don't benefit from LLM rewrite: skip the call.
         if len(state.question.split()) <= self._short_query_threshold:
             raw = _strip_stop_words(state.question) or state.question
@@ -1259,9 +1512,15 @@ class AgenticRAG:
                 if tokens:
                     name_f = self.name_field
 
+                    boost_max = self._name_field_boost_max
+
                     def _tok_boost(d: Document) -> float:
                         name = (d.metadata.get(name_f, "") or "").lower()
-                        return 1.5 if all(t in name for t in tokens) else 1.0
+                        hits = sum(1 for t in tokens if t in name)
+                        # Graded boost: 1.0 + boost_max * coverage_ratio.
+                        # Small default keeps rerank order stable across
+                        # paraphrase variants (no all-or-nothing flip).
+                        return 1.0 + boost_max * (hits / len(tokens))
 
                     scored = sorted(
                         ((d, s * _tok_boost(d)) for d, s in scored),
@@ -1381,10 +1640,12 @@ class AgenticRAG:
                 scores = [
                     float(d.metadata.get("_rankingScore", 0.0)) for d in docs_scored
                 ]
+                dom_th = self._rerank_skip_dominance
                 dominant = (
-                    len(scores) >= 2
-                    and scores[0] >= 0.85
-                    and scores[0] - scores[-1] >= 0.1
+                    dom_th is not None
+                    and len(scores) >= 2
+                    and scores[0] >= dom_th
+                    and scores[0] - scores[-1] >= self._rerank_skip_gap
                 )
                 if token_hits >= max(1, len(q_tokens) // 2) and dominant:
                     indexed = [(i, 1.0 / (i + 1)) for i in range(len(state.documents))]
@@ -1417,7 +1678,7 @@ class AgenticRAG:
                     rerank_docs,
                     effective_top_n,
                 )
-            results = await asyncio.wait_for(coro, timeout=30.0)
+            results = await asyncio.wait_for(coro, timeout=self._rerank_timeout_s)
             indexed = [(r.index, r.relevance_score) for r in results]
             expert_fired = False
             if self._expert_reranker and len(results) >= 2:
@@ -1425,7 +1686,7 @@ class AgenticRAG:
                 top1 = scores[0]
                 ref = scores[min(len(scores) - 1, 4)]
                 gap = top1 - ref
-                if gap < self.expert_threshold:
+                if self.expert_threshold is not None and gap < self.expert_threshold:
                     indexed = await self._aexpert_rerank(
                         rerank_query, state.documents, indexed
                     )
@@ -1681,6 +1942,10 @@ class AgenticRAG:
 
     async def _aquality_gate(self, state: RAGState) -> RAGState:
         t0 = time.perf_counter()
+        if not self._enable_quality_gate:
+            new = state.model_copy(update={"quality_ok": bool(state.documents)})
+            self._trace(new, "quality_gate", t0, path="disabled", ok=new.quality_ok)
+            return new
         if not state.documents or state.iterations >= self.max_iter:
             new = state.model_copy(update={"quality_ok": bool(state.documents)})
             self._trace(
@@ -1745,6 +2010,8 @@ class AgenticRAG:
         return "give_up" if state.iterations >= self.max_iter else "rewrite"
 
     def _reason_route(self, state: RAGState) -> Literal["reason", "quality_gate"]:
+        if not self._enable_reasoning:
+            return "quality_gate"
         return "reason" if self._needs_reasoning(state) else "quality_gate"
 
     async def _aread_memory(
@@ -2018,6 +2285,8 @@ class AgenticRAG:
         return field_values
 
     async def _adetect_filter_intent(self, question: str) -> FilterIntent:
+        if not self._enable_filter_intent:
+            return FilterIntent(field=None, value="", operator="")
         config = self.backend.get_index_config()
         filterable = config.filterable_attributes
         if not filterable:
@@ -2034,13 +2303,33 @@ class AgenticRAG:
         # token (year/version), or uppercase code. Embedded digits (bm25, oauth2)
         # are technical jargon, not entities — don't count them.
         words = question.strip().split()
-        has_entity_signal = any(
+        # Language-agnostic filter-intent words (from/by/without) covering
+        # German, French, Italian, English — the four languages of the
+        # Swiss construction market. Any occurrence alongside a content
+        # word is a strong filter signal.
+        _FILTER_INTENT_WORDS = {
+            # German
+            "von", "vom", "aus", "ohne", "nicht", "kein", "keine",
+            "für", "fur", "bei", "mit",
+            # French
+            "de", "du", "des", "sans", "pour", "par", "pas",
+            "avec", "chez",
+            # Italian
+            "di", "da", "del", "della", "senza", "non", "per", "con",
+            # English
+            "from", "without", "not", "no", "for", "by", "of", "with",
+        }
+        has_capital_signal = any(
             (i > 0 and w and w[0].isupper() and not w.isupper())
             or (w and w[0].isdigit())
             or (len(w) >= 3 and w.isupper())
             for i, w in enumerate(words)
         )
-        if not has_entity_signal:
+        has_filter_word = any(w.lower() in _FILTER_INTENT_WORDS for w in words)
+        # Run LLM when we have a clear signal OR the query is long enough
+        # (4+ words) that lowercase brand/entity mentions are likely.
+        # Under 4 words without signals → keyword bag, skip LLM.
+        if not (has_capital_signal or has_filter_word or len(words) >= 4):
             return FilterIntent(field=None, value="", operator="")
 
         cached = _cache.load("filter-intent-v5", tuple(filterable), question)
@@ -2226,6 +2515,8 @@ class AgenticRAG:
         return result
 
     async def _acompute_hyde(self, question: str) -> str:
+        if not self._enable_hyde:
+            return ""
         """Pre-compute HyDE text, to be run concurrently with preprocessing."""
         if self.embed_fn and len(question.split()) >= self.hyde_min_words:
             try:
@@ -2341,10 +2632,19 @@ class AgenticRAG:
         top_score = (
             float(fast_docs[0].metadata.get("_rankingScore", 0.0)) if fast_docs else 0.0
         )
-        fast_accept = top_score >= 0.85 and len(fast_docs) >= k
-        if not fast_accept and fast_docs and len(fast_docs) >= k:
+        score_th = self._fast_accept_score
+        conf_th = self._fast_accept_confidence
+        fast_accept = (
+            score_th is not None and top_score >= score_th and len(fast_docs) >= k
+        )
+        if (
+            not fast_accept
+            and conf_th is not None
+            and fast_docs
+            and len(fast_docs) >= k
+        ):
             rc = await self._arelevance_check(query, fast_docs)
-            fast_accept = rc.makes_sense and rc.confidence >= 0.9
+            fast_accept = rc.makes_sense and rc.confidence >= conf_th
         if fast_accept:
             state = RAGState(
                 question=query, query=query, documents=fast_docs, iterations=1
@@ -2368,9 +2668,12 @@ class AgenticRAG:
 
         # When BM25 completely fails (typo / transliteration / no keyword match),
         # fall back to near-pure semantic search to recover recall.
+        # bm25_fallback_threshold=None disables the fallback entirely.
         effective_semantic_ratio = state.adaptive_semantic_ratio
+        fb_th = self._bm25_fallback_threshold
         if (
-            top_score < self._bm25_fallback_threshold
+            fb_th is not None
+            and top_score < fb_th
             and effective_semantic_ratio is None
         ):
             effective_semantic_ratio = self._bm25_fallback_semantic_ratio

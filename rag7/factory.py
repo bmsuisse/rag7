@@ -311,6 +311,13 @@ def init_agent(
     if resolved_reranker is not None:
         kwargs["reranker"] = resolved_reranker
 
+    # Auto-discover RAGConfig (rag7.config.toml > pyproject.toml > env >
+    # defaults) unless the caller already passed one in kwargs.
+    if "config" not in kwargs:
+        from .config import RAGConfig
+
+        kwargs["config"] = RAGConfig.auto()
+
     if resolved_collections is not None:
         return AgenticRAG(
             index=index or ",".join(resolved_collections),

@@ -34,7 +34,8 @@ from .rerankers import (  # noqa: E402
 )
 
 try:  # noqa: E402
-    from .embed_anything import EmbedAnythingEmbedder, EmbedAnythingReranker
+    from .embedder import EmbedAnythingEmbedder
+    from .rerankers import EmbedAnythingReranker
 except ImportError:
     pass
 from .utils import _dbsf_fuse, _make_azure_embed_fn, _rrf_fuse  # noqa: E402

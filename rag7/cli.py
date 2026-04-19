@@ -726,7 +726,8 @@ def main() -> None:
             index = _prompt("  Index / collection name", default="documents")
 
         collections_cfg: list[str] | dict[str, str] | None = None
-        if not args.collections:
+        # Only prompt for extras if the user ran the wizard or omitted --skip-wizard.
+        if not args.collections and not args.skip_wizard:
             multi = _prompt(
                 "  Extra collections (comma-sep, blank=single)", default=""
             ).strip()
