@@ -6,9 +6,20 @@ from typing import cast
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage
+from tenacity import (
+    AsyncRetrying,
+    retry_if_exception,
+    stop_after_attempt,
+    wait_exponential_jitter,
+)
 
 from .models import RerankResult
 from .utils import _run_sync
+
+
+def _is_rate_limit(exc: BaseException) -> bool:
+    msg = str(exc).lower()
+    return "429" in msg or "rate" in msg
 
 
 class CohereReranker:
@@ -312,22 +323,25 @@ class LLMReranker:
     async def _score(self, query: str, doc: str, idx: int) -> tuple[int, float]:
         import re
 
+        if self._llm is None:
+            return idx, 0.0
         prompt = (
             f"Rate the relevance of this document to the query on a scale 0.0-1.0.\n"
             f"Query: {query}\n\nDocument: {doc[: self._doc_chars]}\n\n"
             f"Return ONLY a single float between 0.0 and 1.0."
         )
         async with self._sem:
-            for attempt in range(4):
-                try:
-                    if self._llm is None:
-                        return idx, 0.0
-                    resp = await self._llm.ainvoke([HumanMessage(prompt)])
-                    m = re.search(r"\d+\.?\d*", str(resp.content).strip())
-                    return idx, float(m.group()) if m else 0.0
-                except Exception as e:
-                    if "429" in str(e) or "rate" in str(e).lower():
-                        await asyncio.sleep(2**attempt)
-                        continue
-                    return idx, 0.0
+            try:
+                async for attempt in AsyncRetrying(
+                    retry=retry_if_exception(_is_rate_limit),
+                    wait=wait_exponential_jitter(initial=1, max=16),
+                    stop=stop_after_attempt(4),
+                    reraise=True,
+                ):
+                    with attempt:
+                        resp = await self._llm.ainvoke([HumanMessage(prompt)])
+                        m = re.search(r"\d+\.?\d*", str(resp.content).strip())
+                        return idx, float(m.group()) if m else 0.0
+            except Exception:
+                return idx, 0.0
         return idx, 0.0

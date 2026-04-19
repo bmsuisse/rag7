@@ -1,6 +1,6 @@
 [project]
 name = "rag7"
-version = "0.6.5"
+version = "0.7.0"
 description = "rag7 — multi-backend retrieval-augmented generation with LangGraph"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -45,6 +45,7 @@ pgvector = ["psycopg[binary]>=3.2.0", "pgvector>=0.4.0"]
 cache-pg = ["psycopg[binary]>=3.2.0", "psycopg-pool>=3.2.0"]
 qdrant = ["qdrant-client>=1.12.0"]
 duckdb = ["duckdb>=1.2.0"]
+tune = ["optuna>=4.8.0"]
 cli = [
     "rich>=13.0.0",
     "python-dotenv>=1.2.2",
@@ -172,10 +173,31 @@ dev = [
     "faker>=40.13.0",
     "langgraph-checkpoint-postgres>=3.0.5",
     "mem0ai>=2.0.0",
+    "optuna>=4.8.0",
     "pgvector>=0.4.2",
     "psycopg2-binary>=2.9.11",
     "psycopg[binary]>=3.3.3",
     "pyright>=1.1.408",
+    "pytest>=9.0.3",
+    "pytest-asyncio>=1.3.0",
     "python-dotenv>=1.2.2",
     "ruff>=0.15.9",
 ]
+
+[tool.rag7]
+top_k = 10
+retrieval_factor = 5
+rerank_top_n = 3
+rerank_cap_multiplier = 2.904843960174362
+semantic_ratio = 0.5081105348439731
+fusion = "rrf"
+hyde_min_words = 8
+short_query_threshold = 8
+short_query_sort_tokens = true
+bm25_fallback_threshold = 0.36667607740510133
+bm25_fallback_semantic_ratio = 0.8004385528669709
+expert_top_n = 10
+expert_threshold = 0.15
+max_iter = 3
+n_swarm_queries = 4
+rerank_chars = 2048

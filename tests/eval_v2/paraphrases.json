@@ -439,5 +439,69 @@
       "Fischer Anker für Beton",
       "Schraubanker für Beton von Fischer"
     ]
+  },
+  {
+    "seed": "Makita Akku Bohrhammer 18V",
+    "variants": [
+      "Makita Bohrhammer Akku 18 V",
+      "Makita kabelloser Bohrhammer 18V",
+      "Makita Bohrhammer 18V Akku"
+    ]
+  },
+  {
+    "seed": "Bosch Winkelschleifer 125mm",
+    "variants": [
+      "Bosch Winkelschleifer 125 mm",
+      "Bosch Trennschleifer 125mm",
+      "Bosch Winkelschleifer 125mm Schleifscheibe"
+    ]
+  },
+  {
+    "seed": "Schutzhelm Bauhelm",
+    "variants": [
+      "Bauhelm Schutzhelm",
+      "Schutz-Helm Bauhelm",
+      "Schutzhelm für Bauarbeiten Bauhelm"
+    ]
+  },
+  {
+    "seed": "Hilti Anker Bolzen M12",
+    "variants": [
+      "Hilti Ankerbolzen M12",
+      "M12 Hilti Anker-Bolzen",
+      "Hilti Ankerbolzen 12 mm"
+    ]
+  },
+  {
+    "seed": "Wedi Bauplatte 10mm",
+    "variants": [
+      "Wedi Bauplatte 10 mm",
+      "Wedi Platte 10mm Bauplatte",
+      "Wedi Bauplattensteg 10 mm"
+    ]
+  },
+  {
+    "seed": "Sand gewaschen 0-4mm",
+    "variants": [
+      "Sand gewaschen 0–4 mm",
+      "Sand 0-4mm gewaschen",
+      "Waschsand 0–4mm"
+    ]
+  },
+  {
+    "seed": "ACO Drain Rinne Monoblock",
+    "variants": [
+      "ACO Abflussrinne Monoblock",
+      "ACO Drainage Rinne Monoblock",
+      "ACO Dränrinne Monoblock"
+    ]
+  },
+  {
+    "seed": "Entwässerung Ablauf",
+    "variants": [
+      "Ablauf Entwässerung",
+      "Entwässerungsablauf",
+      "Ablaufrinne Entwässerung"
+    ]
   }
 ]

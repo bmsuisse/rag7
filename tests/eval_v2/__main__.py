@@ -31,7 +31,28 @@ from tests.eval_v2.runner import (
 #   ]
 #   SUITES = [("my_meili_index", "My Product Catalog", MY_HITS)]
 
-SUITES: list[tuple[str, str, list[HIT_CASE]]] = []
+ONETRADE_DE_HITS: list[HIT_CASE] = [
+    ("Makita Akku Bohrhammer 18V", ["1065144", "8170146", "1059195"], "article_id"),
+    ("Bosch Winkelschleifer 125mm", ["1057802", "1058233", "1075261"], "article_id"),
+    ("Schutzhelm Bauhelm", ["1054731", "1060660", "9137783"], "article_id"),
+    ("Hilti Anker Bolzen M12", ["6150515", "1143910"], "article_id"),
+]
+
+ARTICLE_HITS: list[HIT_CASE] = [
+    ("Wedi Bauplatte 10mm", ["1003118", "01509094", "01509098"], "id"),
+    ("Sand gewaschen 0-4mm", ["01561902", "01580072"], "id"),
+]
+
+SUPPLIER_CATALOGS_DE_HITS: list[HIT_CASE] = [
+    ("ACO Drain Rinne Monoblock", ["-1284896587609186235", "7647252346056341609"], "id"),
+    ("Entwässerung Ablauf", ["6470805727571075019", "-1284896587609186235"], "id"),
+]
+
+SUITES: list[tuple[str, str, list[HIT_CASE]]] = [
+    ("onetrade_articles_de", "OneTrade DE Articles", ONETRADE_DE_HITS),
+    ("article", "Article Catalog", ARTICLE_HITS),
+    ("supplier_catalogs_de", "Supplier Catalogs DE", SUPPLIER_CATALOGS_DE_HITS),
+]
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -39,10 +60,13 @@ async def _build_rag(index: str, embed_fn: Any) -> Any:
     from rag7 import AgenticRAG
     from rag7.backend import MeilisearchBackend
 
+    from rag7 import RAGConfig
+
     return AgenticRAG(
         index=index,
         backend=MeilisearchBackend(index=index),
         embed_fn=embed_fn,
+        config=RAGConfig.auto(),
         auto_strategy=True,
     )
 

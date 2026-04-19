@@ -174,3 +174,6 @@ tests/test_fake_data.py
 .agents
 .uv-cache/
 skills-lock.json
+
+# Local tuned config (per-deployment, not shipped)
+rag7.config.toml

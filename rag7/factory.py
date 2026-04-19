@@ -75,7 +75,6 @@ def _build_backend(
         kw["embed_fn"] = embed_fn
     kw.update(backend_kwargs)
 
-    # backends that take the index / collection name as first positional arg
     _takes_index = {
         "MeilisearchBackend",
         "ChromaDBBackend",
@@ -254,7 +253,6 @@ def init_agent(
     """
     from .core import AgenticRAG
 
-    # ── backend(s) ────────────────────────────────────────────────────────────
     resolved_backend: Any = None
     resolved_collections: dict[str, Any] | None = None
     collection_descriptions: dict[str, str] | None = None
@@ -282,7 +280,6 @@ def init_agent(
     else:
         resolved_backend = backend
 
-    # ── reranker ──────────────────────────────────────────────────────────────
     resolved_reranker: Any | None = None
     if reranker is not None:
         if isinstance(reranker, str):
@@ -292,16 +289,19 @@ def init_agent(
         else:
             resolved_reranker = reranker
 
-    # ── LLM ───────────────────────────────────────────────────────────────────
     if model is not None:
-        from langchain.chat_models import init_chat_model  # type: ignore[import-untyped]
+        from langchain.chat_models import (
+            init_chat_model,  # type: ignore[import-untyped]
+        )
 
         llm = init_chat_model(model, temperature=0)
         gen_llm = init_chat_model(gen_model, temperature=0) if gen_model else llm
         kwargs["llm"] = llm
         kwargs["gen_llm"] = gen_llm
     elif gen_model is not None:
-        from langchain.chat_models import init_chat_model  # type: ignore[import-untyped]
+        from langchain.chat_models import (
+            init_chat_model,  # type: ignore[import-untyped]
+        )
 
         kwargs["gen_llm"] = init_chat_model(gen_model, temperature=0)
 

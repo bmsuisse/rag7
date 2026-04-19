@@ -1153,6 +1153,102 @@ Pass `category_fields=[]` to disable the fallback entirely.
 
 ---
 
+## 🎯 Tune It For Your Data
+
+*"Q-Branch fits the gadget to the agent, not the other way around."*
+
+**`rag7` ships with curated tuned defaults** in `[tool.rag7]` of `pyproject.toml`,
+found by running the built-in tuner against real German/Swiss product catalog
+data. These are better than hand-picked defaults for most retrieval tasks.
+
+For peak performance on **your** corpus (product vs. legal vs. support vs.
+scientific), run the tuner yourself — it searches the config space with
+[Optuna](https://optuna.org) and usually beats defaults by 5–15% on hit@5.
+
+### 1. Install
+
+```bash
+pip install 'rag7[tune]'
+```
+
+### 2. Write a testset
+
+A list of `(query, expected_doc_ids, id_field)` tuples — or a JSON file:
+
+```json
+[
+  {"query": "Makita Akku Bohrhammer 18V", "expected_ids": ["SKU-1065144"], "id_field": "sku"},
+  {"query": "Bosch Winkelschleifer 125mm", "expected_ids": ["SKU-1057802"], "id_field": "sku"}
+]
+```
+
+### 3. Run the tuner
+
+```python
+from rag7 import MeilisearchBackend, RAGConfig
+from rag7.tuner import RAGTuner, load_testset
+from rag7.utils import _make_azure_embed_fn
+
+tuner = RAGTuner(
+    backend_factory=lambda: MeilisearchBackend(index="my_index"),
+    embed_fn=_make_azure_embed_fn(),
+    hit_cases=load_testset("testset.json"),
+    eval_k=5,
+)
+
+best = tuner.tune(n_trials=50)
+best.save_toml("rag7.config.toml")   # gitignored — local override (recommended)
+# or: best.save_pyproject()          # [tool.rag7] — commit if your team shares tuning
+```
+
+### 4. Use the tuned config
+
+No code change required — `AgenticRAG` picks up `[tool.rag7]` automatically:
+
+```python
+from rag7 import AgenticRAG, RAGConfig, MeilisearchBackend
+
+rag = AgenticRAG(
+    index="my_index",
+    backend=MeilisearchBackend("my_index"),
+    embed_fn=embed_fn,
+    config=RAGConfig.auto(),   # discovers pyproject.toml → rag7.config.toml → env
+)
+```
+
+### Config discovery order
+
+1. **Runtime kwarg** — `AgenticRAG(config=RAGConfig(...))`
+2. **`[tool.rag7]` in `pyproject.toml`** — matches ruff/black/mypy convention.
+   `rag7` ships with curated defaults here; override or delete the block to
+   fall through to your own tuning.
+3. **`rag7.config.toml`** — per-deployment tuning. **Gitignored by default**
+   because values here are corpus-specific. This is the recommended place for
+   your own tuned config unless your whole team uses the same data.
+4. **`RAG_*` env vars** — containers/CI overrides.
+5. **Library defaults** — fallback if nothing else is set.
+
+### What gets tuned
+
+| Parameter | Range | Effect |
+|-----------|-------|--------|
+| `retrieval_factor` | 2–8 | Over-retrieve multiplier before reranking |
+| `rerank_top_n` | 3–10 | Docs kept post-rerank |
+| `rerank_cap_multiplier` | 1.5–4 | Caps reranker input at `top_k × m` |
+| `semantic_ratio` | 0.3–0.9 | BM25 ⇄ vector balance |
+| `fusion` | `rrf` / `dbsf` | Score fusion strategy |
+| `short_query_threshold` | 3–8 | When to skip LLM preprocessing |
+| `short_query_sort_tokens` | bool | Sort tokens for paraphrase invariance |
+| `bm25_fallback_threshold` | 0.2–0.6 | When weak BM25 triggers semantic boost |
+| `bm25_fallback_semantic_ratio` | 0.7–1.0 | Boost target ratio |
+| `expert_threshold` | 0.05–0.3 | Expert reranker escalation |
+
+Optuna's TPE sampler learns from prior trials — **50 trials usually beats
+hand-tuning**. Use a cheap LLM (e.g. `gpt-4o-mini`) during tuning to keep cost
+down; swap to your production LLM afterwards.
+
+---
+
 ## 🖥️ CLI
 
 *"The gadgets are ready."*

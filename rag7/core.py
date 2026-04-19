@@ -44,6 +44,7 @@ from .models import (
     Reranker,
     SearchQuery,
 )
+from .config import RAGConfig
 from .rerankers import CohereReranker, LLMReranker
 from .tools import RAGToolset
 from .utils import (
@@ -515,6 +516,7 @@ class AgenticRAG:
         checkpointer: Any = None,
         memory_store: Any = None,
         mem0_memory: Any = None,
+        config: "RAGConfig | None" = None,
     ):
         self.index = index
         if collections:
@@ -595,6 +597,40 @@ class AgenticRAG:
             if expert_threshold is not None
             else float(os.getenv("RAG_EXPERT_THRESHOLD", "0.15"))
         )
+
+        if config is not None:
+            self.top_k = config.top_k
+            self.retrieval_factor = config.retrieval_factor
+            self.rerank_top_n = config.rerank_top_n
+            self._rerank_cap_multiplier = config.rerank_cap_multiplier
+            self.semantic_ratio = config.semantic_ratio
+            self.fusion = config.fusion
+            self.hyde_min_words = config.hyde_min_words
+            self._short_query_threshold = config.short_query_threshold
+            self._short_query_sort_tokens = config.short_query_sort_tokens
+            self._bm25_fallback_threshold = config.bm25_fallback_threshold
+            self._bm25_fallback_semantic_ratio = config.bm25_fallback_semantic_ratio
+            self.expert_top_n = config.expert_top_n
+            self.expert_threshold = config.expert_threshold
+            self.max_iter = config.max_iter
+            self.n_swarm_queries = config.n_swarm_queries
+            self.rerank_chars = config.rerank_chars
+        else:
+            self._rerank_cap_multiplier = float(
+                os.getenv("RAG_RERANK_CAP_MULTIPLIER", "2.0")
+            )
+            self._short_query_threshold = int(
+                os.getenv("RAG_SHORT_QUERY_THRESHOLD", "6")
+            )
+            self._short_query_sort_tokens = bool(
+                int(os.getenv("RAG_SHORT_QUERY_SORT_TOKENS", "1"))
+            )
+            self._bm25_fallback_threshold = float(
+                os.getenv("RAG_BM25_FALLBACK_THRESHOLD", "0.4")
+            )
+            self._bm25_fallback_semantic_ratio = float(
+                os.getenv("RAG_BM25_FALLBACK_SEMANTIC_RATIO", "0.9")
+            )
 
         self._domain_hint: str = ""
         self._field_values_cache: dict = {}
@@ -791,8 +827,15 @@ class AgenticRAG:
     async def _apreprocess(self, state: RAGState) -> RAGState:
         t0 = time.perf_counter()
         # Short, keyword-like questions don't benefit from LLM rewrite: skip the call.
-        if len(state.question.split()) <= 6:
+        if len(state.question.split()) <= self._short_query_threshold:
             raw = _strip_stop_words(state.question) or state.question
+            # Normalize token order for product-name queries so paraphrase variants
+            # ("Sand gewaschen 0-4mm" vs "Sand 0-4mm gewaschen") resolve to the
+            # same canonical BM25 query and thus retrieve the same candidate set.
+            if self._short_query_sort_tokens:
+                tokens = raw.split()
+                if len(tokens) > 1:
+                    raw = " ".join(sorted(tokens, key=str.lower))
             new = state.model_copy(
                 update={
                     "query": raw,
@@ -1351,7 +1394,14 @@ class AgenticRAG:
                     )
                     self._trace(new, "rerank", t0, skipped="confident")
                     return new
-        rerank_docs = self._make_rerank_docs(state.documents)
+        # Cap rerank input to 2*top_k: the reranker rarely promotes a doc from
+        # retrieval rank 20+ into the top-5, so reranking the full pool (up to
+        # top_k * retrieval_factor = 40) wastes compute without recall gain.
+        rerank_cap = max(
+            int(self.top_k * self._rerank_cap_multiplier), self.rerank_top_n * 2
+        )
+        capped_docs = state.documents[:rerank_cap]
+        rerank_docs = self._make_rerank_docs(capped_docs)
         effective_top_n = len(rerank_docs)
         rerank_query = state.question or state.query
 
@@ -2316,12 +2366,20 @@ class AgenticRAG:
                 state.query, state.alternative_to, k
             )
 
+        # When BM25 completely fails (typo / transliteration / no keyword match),
+        # fall back to near-pure semantic search to recover recall.
+        effective_semantic_ratio = state.adaptive_semantic_ratio
+        if (
+            top_score < self._bm25_fallback_threshold
+            and effective_semantic_ratio is None
+        ):
+            effective_semantic_ratio = self._bm25_fallback_semantic_ratio
         broad_docs = await self._asearch(
             state.query,
             question=state.question,
             extra_bm25=state.query_variants,
             factor=self.retrieval_factor,
-            adaptive_semantic_ratio=state.adaptive_semantic_ratio,
+            adaptive_semantic_ratio=effective_semantic_ratio,
             adaptive_fusion=state.adaptive_fusion,
             hyde_text=hyde_text,
         )

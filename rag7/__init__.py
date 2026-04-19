@@ -22,6 +22,7 @@ from .backend import (  # noqa: E402
     SearchBackend,
     SearchRequest,
 )
+from .config import RAGConfig  # noqa: E402
 from .core import AgenticRAG  # noqa: E402
 from .models import ConversationTurn, RAGState, Reranker, RerankResult  # noqa: E402
 from .rerankers import (  # noqa: E402
@@ -43,6 +44,7 @@ Agent = AgenticRAG
 __all__ = [
     "Agent",
     "AgenticRAG",
+    "RAGConfig",
     "init_agent",
     "AzureAISearchBackend",
     "ChromaDBBackend",
