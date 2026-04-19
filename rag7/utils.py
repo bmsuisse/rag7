@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import hashlib
+import json
 import os
+import re
+import threading
+from pathlib import Path
 from typing import Any, Callable, Coroutine
 
 import requests as _requests
@@ -52,6 +57,209 @@ def _doc_id(meta: dict) -> str:
     return str(meta.get("id") or meta.get("article_id") or meta.get("corpus_id", ""))
 
 
+# ── Embedding cache ───────────────────────────────────────────────────────────
+# Enabled by default (embedding is deterministic for a given model + text).
+# Opt-out with RAG7_EMBED_CACHE=0.
+#
+# Backend picked by RAG7_EMBED_CACHE_URL:
+#   unset / "local" / path      → single-file JSON at ~/.cache/rag7/embeddings/
+#   "redis://host:port/db"      → Redis, one key per (model, sha256(text))
+#   "postgres://user@host/db"   → Postgres table (reuses ``_cache.py`` schema)
+# Any backend that can't load its driver (``redis`` / ``psycopg``) silently
+# falls back to the local disk cache.
+
+_EMBED_CACHE_MAX_BYTES = 50 * 1024 * 1024  # 50 MB
+_EMBED_CACHE_LOCK = threading.Lock()
+_EMBED_CACHE_MEM: dict[str, dict[str, list[float]]] = {}
+_EMBED_CACHE_DIRTY: set[str] = set()
+_EMBED_REDIS_CLIENT: Any = None
+_EMBED_PG_POOL: Any = None
+_EMBED_BACKEND_READY = False
+_EMBED_BACKEND: str = "local"  # "local" | "redis" | "pg"
+
+
+def _embed_cache_enabled() -> bool:
+    return os.environ.get("RAG7_EMBED_CACHE", "1").lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+
+
+def _embed_cache_backend() -> str:
+    """Resolve + lazy-init the active cache backend from ``RAG7_EMBED_CACHE_URL``.
+
+    Returns 'local' / 'redis' / 'pg'. Caches the resolution after first call.
+    """
+    global _EMBED_BACKEND_READY, _EMBED_BACKEND, _EMBED_REDIS_CLIENT, _EMBED_PG_POOL
+    if _EMBED_BACKEND_READY:
+        return _EMBED_BACKEND
+    _EMBED_BACKEND_READY = True
+    url = os.environ.get("RAG7_EMBED_CACHE_URL", "").strip()
+    if url.startswith("redis://") or url.startswith("rediss://"):
+        try:
+            import redis  # type: ignore[import-not-found]
+
+            _EMBED_REDIS_CLIENT = redis.Redis.from_url(url, decode_responses=False)
+            _EMBED_REDIS_CLIENT.ping()
+            _EMBED_BACKEND = "redis"
+        except Exception:
+            _EMBED_BACKEND = "local"
+    elif url.startswith("postgres://") or url.startswith("postgresql://"):
+        try:
+            import logging as _logging
+
+            # Silence the retry barrage on invalid connection strings.
+            _logging.getLogger("psycopg.pool").setLevel(_logging.CRITICAL)
+            from psycopg_pool import ConnectionPool  # type: ignore[import-not-found]
+
+            _EMBED_PG_POOL = ConnectionPool(
+                url, min_size=1, max_size=4, open=False, timeout=2.0
+            )
+            _EMBED_PG_POOL.open(wait=True, timeout=2.0)
+            with _EMBED_PG_POOL.connection() as conn, conn.cursor() as cur:
+                cur.execute(
+                    "CREATE TABLE IF NOT EXISTS rag7_embed_cache ("
+                    "  model TEXT NOT NULL,"
+                    "  key TEXT NOT NULL,"
+                    "  vec JSONB NOT NULL,"
+                    "  created_at TIMESTAMPTZ DEFAULT NOW(),"
+                    "  PRIMARY KEY (model, key)"
+                    ")"
+                )
+                conn.commit()
+            _EMBED_BACKEND = "pg"
+        except Exception:
+            _EMBED_BACKEND = "local"
+    else:
+        _EMBED_BACKEND = "local"
+    return _EMBED_BACKEND
+
+
+def _embed_cache_dir() -> Path:
+    return Path.home() / ".cache" / "rag7" / "embeddings"
+
+
+def _embed_cache_path(model: str) -> Path:
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", model) or "model"
+    return _embed_cache_dir() / f"{safe}.json"
+
+
+def _embed_text_hash(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _embed_cache_load(model: str) -> dict[str, list[float]]:
+    if model in _EMBED_CACHE_MEM:
+        return _EMBED_CACHE_MEM[model]
+    path = _embed_cache_path(model)
+    data: dict[str, list[float]] = {}
+    if path.exists():
+        try:
+            raw = json.loads(path.read_text())
+            if isinstance(raw, dict):
+                for k, v in raw.items():
+                    if isinstance(v, list):
+                        data[k] = [float(x) for x in v]
+        except Exception:
+            data = {}
+    _EMBED_CACHE_MEM[model] = data
+    return data
+
+
+def _embed_cache_flush(model: str) -> None:
+    if model not in _EMBED_CACHE_DIRTY:
+        return
+    data = _EMBED_CACHE_MEM.get(model)
+    if data is None:
+        return
+    path = _embed_cache_path(model)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(json.dumps(data))
+        tmp.replace(path)
+        _EMBED_CACHE_DIRTY.discard(model)
+    except Exception:
+        pass
+
+
+def _embed_cache_trim(data: dict[str, list[float]]) -> None:
+    # Approx JSON size: each entry is "hash": [...floats...] ~ 65 + ~18*dim bytes.
+    # Drop oldest (FIFO by dict insertion order) until estimate fits.
+    if not data:
+        return
+    any_vec = next(iter(data.values()))
+    per_entry = 70 + 18 * len(any_vec)
+    max_entries = max(1, _EMBED_CACHE_MAX_BYTES // per_entry)
+    while len(data) > max_entries:
+        oldest = next(iter(data))
+        del data[oldest]
+
+
+def _embed_cache_get(model: str, text: str) -> list[float] | None:
+    if not _embed_cache_enabled():
+        return None
+    key = _embed_text_hash(text)
+    backend = _embed_cache_backend()
+    if backend == "redis":
+        try:
+            raw = _EMBED_REDIS_CLIENT.get(f"rag7:embed:{model}:{key}")
+            return [float(x) for x in json.loads(raw)] if raw else None
+        except Exception:
+            return None
+    if backend == "pg":
+        try:
+            with _EMBED_PG_POOL.connection() as conn, conn.cursor() as cur:
+                cur.execute(
+                    "SELECT vec FROM rag7_embed_cache WHERE model=%s AND key=%s",
+                    (model, key),
+                )
+                row = cur.fetchone()
+                return [float(x) for x in row[0]] if row else None
+        except Exception:
+            return None
+    with _EMBED_CACHE_LOCK:
+        data = _embed_cache_load(model)
+        vec = data.get(key)
+        return list(vec) if vec is not None else None
+
+
+def _embed_cache_put(model: str, text: str, vec: list[float]) -> None:
+    if not _embed_cache_enabled():
+        return
+    key = _embed_text_hash(text)
+    backend = _embed_cache_backend()
+    if backend == "redis":
+        try:
+            _EMBED_REDIS_CLIENT.set(f"rag7:embed:{model}:{key}", json.dumps(vec))
+        except Exception:
+            pass
+        return
+    if backend == "pg":
+        try:
+            with _EMBED_PG_POOL.connection() as conn, conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO rag7_embed_cache (model, key, vec) "
+                    "VALUES (%s, %s, %s::jsonb) "
+                    "ON CONFLICT (model, key) DO NOTHING",
+                    (model, key, json.dumps(vec)),
+                )
+                conn.commit()
+        except Exception:
+            pass
+        return
+    with _EMBED_CACHE_LOCK:
+        data = _embed_cache_load(model)
+        if key in data:
+            return
+        data[key] = list(vec)
+        _embed_cache_trim(data)
+        _EMBED_CACHE_DIRTY.add(model)
+        _embed_cache_flush(model)
+
+
 def _make_azure_embed_fn() -> Callable[[str], list[float]] | None:
     endpoint = (os.getenv("AZURE_OPENAI_ENDPOINT") or "").rstrip("/")
     api_key = os.getenv("AZURE_OPENAI_API_KEY") or ""
@@ -68,13 +276,19 @@ def _make_azure_embed_fn() -> Callable[[str], list[float]] | None:
     from . import _cache as _c
 
     def _embed(text: str) -> list[float]:
+        hit = _embed_cache_get(deploy, text)
+        if hit is not None:
+            return hit
         cached = _c.load("embed-v1", deploy, text)
         if cached is not None:
-            return list(cached)
+            vec = list(cached)
+            _embed_cache_put(deploy, text, vec)
+            return vec
         resp = session.post(url, json={"input": [text]}, timeout=15)
         resp.raise_for_status()
         vec = resp.json()["data"][0]["embedding"]
         _c.save("embed-v1", deploy, text, value=vec)
+        _embed_cache_put(deploy, text, vec)
         return vec
 
     return _embed
@@ -132,3 +346,62 @@ async def _embed_all_async(
             return None
 
     return await asyncio.gather(*[_one(t) for t in texts])
+
+
+def embed_fn_from_langchain(
+    embeddings: Any,
+    *,
+    prefer_query: bool = True,
+) -> Callable[[str], list[float]]:
+    """Wrap any LangChain ``Embeddings`` instance as an rag7 ``embed_fn``.
+
+    Use this to plug LangChain's own caching / batching / provider layers
+    into rag7. The most common case:
+
+    .. code-block:: python
+
+        from langchain_openai import AzureOpenAIEmbeddings
+        from langchain_classic.embeddings import CacheBackedEmbeddings
+        from langchain.storage import LocalFileStore
+
+        base = AzureOpenAIEmbeddings(...)
+        store = LocalFileStore("./embed-cache")
+        cached = CacheBackedEmbeddings.from_bytes_store(
+            base, store, namespace="text-embedding-3-small",
+            query_embedding_store=store,  # CacheBackedEmbeddings skips query
+                                          # caching by default — opt in.
+        )
+
+        from rag7.utils import embed_fn_from_langchain
+        rag = AgenticRAG(
+            index="docs",
+            backend=MeilisearchBackend("docs"),
+            embed_fn=embed_fn_from_langchain(cached),
+        )
+
+    Use the built-in ``_make_azure_embed_fn()`` for the default deployment
+    and single-file JSON cache — this adapter is for users who want a
+    different store (Redis, S3, shared filesystem, etc.).
+
+    Parameters
+    ----------
+    embeddings:
+        Any object exposing ``.embed_query(text) -> list[float]`` and/or
+        ``.embed_documents([text]) -> list[list[float]]``.
+    prefer_query:
+        If True (default), call ``.embed_query()`` — matches rag7's single-
+        text usage. Set False to call ``.embed_documents([text])[0]`` which
+        is what ``CacheBackedEmbeddings`` caches by default.
+    """
+    if prefer_query and hasattr(embeddings, "embed_query"):
+        return embeddings.embed_query  # type: ignore[no-any-return]
+    if hasattr(embeddings, "embed_documents"):
+
+        def _embed(text: str) -> list[float]:
+            return embeddings.embed_documents([text])[0]
+
+        return _embed
+    raise TypeError(
+        f"{type(embeddings).__name__} has neither .embed_query nor "
+        ".embed_documents — not a LangChain Embeddings-compatible object."
+    )

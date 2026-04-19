@@ -38,7 +38,12 @@ try:  # noqa: E402
     from .rerankers import EmbedAnythingReranker
 except ImportError:
     pass
-from .utils import _dbsf_fuse, _make_azure_embed_fn, _rrf_fuse  # noqa: E402
+from .utils import (  # noqa: E402
+    _dbsf_fuse,
+    _make_azure_embed_fn,
+    _rrf_fuse,
+    embed_fn_from_langchain,
+)
 
 Agent = AgenticRAG
 
@@ -72,4 +77,5 @@ __all__ = [
     "_dbsf_fuse",
     "_make_azure_embed_fn",
     "_rrf_fuse",
+    "embed_fn_from_langchain",
 ]
