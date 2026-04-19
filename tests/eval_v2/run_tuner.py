@@ -142,6 +142,15 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output", default="rag7.config.toml")
     parser.add_argument(
+        "--objective",
+        choices=["combined", "combined_prod"],
+        default="combined",
+        help=(
+            "combined = quality only (hit*0.4 + consistency*0.35 + stable*0.25). "
+            "combined_prod = quality + latency (adds speed*0.15)."
+        ),
+    )
+    parser.add_argument(
         "--tune-models",
         action="store_true",
         help="Also tune weak/thinking model selection from CANDIDATE_MODELS",
@@ -271,7 +280,7 @@ def main() -> None:
             return 0.0
         for k, v in metrics.items():
             trial.set_user_attr(k, v)
-        return metrics["combined"]
+        return metrics[args.objective]
 
     sampler = optuna.samplers.TPESampler(seed=args.seed)
     study = optuna.create_study(direction="maximize", sampler=sampler)

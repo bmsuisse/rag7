@@ -36,6 +36,12 @@ ONETRADE_DE_HITS: list[HIT_CASE] = [
     ("Bosch Winkelschleifer 125mm", ["1057802", "1058233", "1075261"], "article_id"),
     ("Schutzhelm Bauhelm", ["1054731", "1060660", "9137783"], "article_id"),
     ("Hilti Anker Bolzen M12", ["6150515", "1143910"], "article_id"),
+    # Regression guard: supplier-filter + structured-attribute lookup.
+    # "bieröffner von proone" must surface the ProOne Multi-Tool (which
+    # lists "Flaschenöffner" in akeneo_values) — not a random ProOne
+    # bestseller like Trockenbeton. Tests the quality-gate score floor
+    # + _hit_to_text structured-field expansion together.
+    ("bieröffner von proone", ["1050541", "7794905"], "article_id"),
 ]
 
 ARTICLE_HITS: list[HIT_CASE] = [
