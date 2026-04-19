@@ -160,7 +160,7 @@ class RAGConfig(BaseModel):
             expert_threshold=_env_float_or_none("RAG_EXPERT_THRESHOLD", "0.15"),
             enable_hyde=bool(int(os.getenv("RAG_ENABLE_HYDE", "1"))),
             enable_filter_intent=bool(int(os.getenv("RAG_ENABLE_FILTER_INTENT", "1"))),
-            enable_reasoning=bool(int(os.getenv("RAG_ENABLE_REASONING", "0"))),
+            enable_reasoning=bool(int(os.getenv("RAG_ENABLE_REASONING", "1"))),
             enable_quality_gate=bool(int(os.getenv("RAG_ENABLE_QUALITY_GATE", "1"))),
             enable_preprocess_llm=bool(
                 int(os.getenv("RAG_ENABLE_PREPROCESS_LLM", "1"))
