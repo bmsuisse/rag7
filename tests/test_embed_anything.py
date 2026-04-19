@@ -18,7 +18,8 @@ os.environ.setdefault("OPENAI_API_KEY", "test-key-unused")
 
 from rag7 import AgenticRAG, InMemoryBackend  # noqa: E402
 from rag7.backend import SearchRequest  # noqa: E402
-from rag7.embed_anything import EmbedAnythingEmbedder, EmbedAnythingReranker  # noqa: E402
+from rag7.embedder import EmbedAnythingEmbedder  # noqa: E402
+from rag7.rerankers import EmbedAnythingReranker  # noqa: E402
 from rag7.models import RerankResult  # noqa: E402
 
 MODEL_ID = "sentence-transformers/all-MiniLM-L6-v2"
