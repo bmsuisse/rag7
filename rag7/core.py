@@ -1526,7 +1526,13 @@ class AgenticRAG:
             top_doc_idx = max(indexed, key=lambda p: p[1])[0]
             top_name = (docs[top_doc_idx].metadata.get(self.name_field) or "").lower()
             q_tokens = [t for t in query.lower().split() if len(t) > 3]
-            confident = bool(q_tokens) and any(t in top_name for t in q_tokens)
+            # Require multi-token match to call it "confident" — single-token
+            # queries like "trockenbeton" match every near-duplicate, killing
+            # commercial tiebreaks. Need at least 2 tokens hit AND a majority.
+            hits = sum(1 for t in q_tokens if t in top_name)
+            confident = (
+                len(q_tokens) >= 2 and hits >= 2 and hits >= len(q_tokens) // 2
+            )
         boost = (lambda _: 1.0) if confident else self.boost_fn
         scored = sorted(
             [(docs[i], s * boost(docs[i].metadata)) for i, s in indexed],
