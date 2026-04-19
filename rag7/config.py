@@ -65,6 +65,14 @@ class RAGConfig(BaseModel):
     rerank_skip_dominance: float | None = Field(default=0.85, ge=0.0, le=1.0)
     rerank_skip_gap: float = Field(default=0.1, ge=0.0, le=1.0)
 
+    # ── Name-field match boost ───────────────────────────────────────────────
+    # After reranking, docs whose primary name_field matches query tokens
+    # get a small multiplier. 0.0 disables; higher values prioritize
+    # name_field matches over rerank scores. Tunable — high values lift
+    # precise lookups ("trockenbeton von fixit") but can destabilize
+    # paraphrase consistency.
+    name_field_boost_max: float = Field(default=0.1, ge=0.0, le=1.0)
+
     # ── Reranker expert escalation ───────────────────────────────────────────
     expert_top_n: int = Field(default=10, ge=2, le=50)
     # None → never fire expert reranker.
@@ -147,6 +155,7 @@ class RAGConfig(BaseModel):
                 "RAG_RERANK_SKIP_DOMINANCE", "0.85"
             ),
             rerank_skip_gap=float(os.getenv("RAG_RERANK_SKIP_GAP", "0.1")),
+            name_field_boost_max=float(os.getenv("RAG_NAME_FIELD_BOOST_MAX", "0.1")),
             expert_top_n=int(os.getenv("RAG_EXPERT_TOP_N", "10")),
             expert_threshold=_env_float_or_none("RAG_EXPERT_THRESHOLD", "0.15"),
             enable_hyde=bool(int(os.getenv("RAG_ENABLE_HYDE", "1"))),

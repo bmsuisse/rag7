@@ -700,6 +700,7 @@ class AgenticRAG:
             self._rerank_skip_gap = config.rerank_skip_gap
             self.expert_top_n = config.expert_top_n
             self.expert_threshold = config.expert_threshold
+            self._name_field_boost_max = config.name_field_boost_max
             self._enable_hyde = config.enable_hyde
             self._enable_filter_intent = config.enable_filter_intent
             self._enable_reasoning = config.enable_reasoning
@@ -737,6 +738,9 @@ class AgenticRAG:
             self._enable_preprocess_llm = True
             self._rerank_timeout_s = 30.0
             self._llm_timeout_s = 60.0
+            self._name_field_boost_max: float = float(
+                os.getenv("RAG_NAME_FIELD_BOOST_MAX", "0.1")
+            )
 
         self._domain_hint: str = ""
         self._field_values_cache: dict = {}
@@ -821,6 +825,12 @@ class AgenticRAG:
             if max_doc_chars > self.rerank_chars:
                 self.rerank_chars = min(8192, int(max_doc_chars * 1.2))
 
+            # Auto-detect the primary name/group fields from the backend's
+            # searchable_attributes ordering. This powers the rerank boost
+            # that promotes docs matching the query in their name_field
+            # over docs that only match in category/group fields.
+            self._infer_name_and_group_fields(sample)
+
             # Cache by schema shape — same index + same doc keys ≈ same strategy.
             schema_sig = self._schema_signature(sample)
             cached = _auto_cache_load(schema_sig)
@@ -903,6 +913,53 @@ class AgenticRAG:
             print(f"  [{self.index}] strategy ({source}): {config}")
         except Exception as e:
             print(f"  [{self.index}] auto-strategy failed ({e}), using defaults")
+
+    def _infer_name_and_group_fields(self, sample: list[dict]) -> None:
+        """Pick the primary name_field / group_field using the backend's
+        attribute priority + sample-doc heuristics.
+
+        ``name_field`` is the highest-priority string attribute that looks
+        like a human-readable identifier (typically ``*_name`` or the
+        first non-ID searchable attr). ``group_field`` is the first attr
+        matching group/category/class naming.
+
+        Backends like Meilisearch list searchable_attributes in priority
+        order, so the first informative string wins. For other backends
+        the list is unordered; the heuristic still picks sensible defaults.
+        """
+        if self.name_field and self.group_field:
+            return
+        try:
+            raw = self.backend.get_index_config().searchable_attributes
+        except Exception:
+            raw = []
+        attrs = [a.split(":", 1)[0] for a in raw if a and not a.startswith("*")]
+        first_doc = sample[0] if sample else {}
+
+        def _looks_like_id(field: str) -> bool:
+            return field.lower() in {"id", "_id", "uid", "uuid"} or field.lower().endswith("_id")
+
+        def _is_string_field(field: str) -> bool:
+            v = first_doc.get(field)
+            return isinstance(v, str) and len(v.strip()) > 0
+
+        if not self.name_field:
+            # Prefer attributes ending in "_name", else first non-ID string attr.
+            candidates = [a for a in attrs if a.lower().endswith("_name") and _is_string_field(a)]
+            if not candidates:
+                candidates = [a for a in attrs if not _looks_like_id(a) and _is_string_field(a)]
+            if candidates:
+                self.name_field = candidates[0]
+
+        if not self.group_field:
+            candidates = [
+                a for a in attrs
+                if any(tok in a.lower() for tok in ("group", "category", "class", "type"))
+                and not _looks_like_id(a)
+                and _is_string_field(a)
+            ]
+            if candidates:
+                self.group_field = candidates[0]
 
     def _schema_signature(self, sample: list[dict]) -> str:
         """Stable hash of index + doc shape + filterable attributes.
@@ -1455,9 +1512,15 @@ class AgenticRAG:
                 if tokens:
                     name_f = self.name_field
 
+                    boost_max = self._name_field_boost_max
+
                     def _tok_boost(d: Document) -> float:
                         name = (d.metadata.get(name_f, "") or "").lower()
-                        return 1.5 if all(t in name for t in tokens) else 1.0
+                        hits = sum(1 for t in tokens if t in name)
+                        # Graded boost: 1.0 + boost_max * coverage_ratio.
+                        # Small default keeps rerank order stable across
+                        # paraphrase variants (no all-or-nothing flip).
+                        return 1.0 + boost_max * (hits / len(tokens))
 
                     scored = sorted(
                         ((d, s * _tok_boost(d)) for d, s in scored),

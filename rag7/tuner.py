@@ -288,6 +288,9 @@ class RAGTuner:
                     trial, "rerank_skip_dominance", 0.6, 0.95
                 ),
                 rerank_skip_gap=trial.suggest_float("rerank_skip_gap", 0.05, 0.3),
+                name_field_boost_max=trial.suggest_float(
+                    "name_field_boost_max", 0.0, 0.5
+                ),
                 expert_threshold=_opt_float(
                     trial, "expert_threshold", 0.05, 0.3
                 ),
@@ -354,6 +357,7 @@ class RAGTuner:
             "short_query_sort_tokens",
             "bm25_fallback_semantic_ratio",
             "rerank_skip_gap",
+            "name_field_boost_max",
             "enable_hyde",
             "enable_filter_intent",
             "enable_quality_gate",
