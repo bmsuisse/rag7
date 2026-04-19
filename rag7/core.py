@@ -995,14 +995,35 @@ class AgenticRAG:
         return SystemMessage(prompt)
 
     def _hit_to_text(self, h: dict) -> str:
-        if "content" in h:
-            return h["content"]
-        return "\n".join(
-            f"{k}: {v.strip() if isinstance(v, str) else v}"
-            for k, v in h.items()
-            if k not in _SKIP_FIELDS
-            and (isinstance(v, str) and v.strip() or isinstance(v, (int, float)) and v)
-        )
+        """Render a hit as text for the reranker + generation LLM.
+
+        If the backend's ``content`` field already concatenates every
+        useful field (most ingestion pipelines do this) we trust it.
+        Otherwise we dynamically flatten every string/number/list/dict
+        field so structured attributes (``akeneo_values``, product
+        specs, stock info) reach the generation LLM — not just the
+        pre-baked summary.
+        """
+        content = h.get("content")
+        extras: list[str] = []
+        for k, v in h.items():
+            if k in _SKIP_FIELDS or k == "content" or not v:
+                continue
+            if isinstance(v, str):
+                text = v.strip()
+                if text and (not content or text not in content):
+                    extras.append(f"{k}: {text}")
+            elif isinstance(v, (int, float, bool)):
+                extras.append(f"{k}: {v}")
+            elif isinstance(v, (list, dict)):
+                # Structured attributes (e.g. akeneo_values) — stringify so
+                # the LLM can read spec tuples like ('Flaschenöffner', 'ja').
+                extras.append(f"{k}: {v}")
+        if content and not extras:
+            return str(content)
+        if content:
+            return str(content) + "\n" + "\n".join(extras)
+        return "\n".join(extras)
 
     def _make_search_request(
         self,
@@ -2027,10 +2048,31 @@ class AgenticRAG:
             )
             return new
 
-        # Trust reranker: if iter 1 and we have a full top_k window, skip LLM gate.
-        if state.iterations <= 1 and len(state.documents) >= self.top_k:
+        # Trust reranker only when BM25 top-1 score is high. When the filter
+        # has narrowed to a category with no real text match (e.g.
+        # "bieröffner von proone" narrows to all ProOne docs but none
+        # actually sells bottle openers), the top score is mediocre (~0.5)
+        # even though we have a full top_k window — fall through to the LLM
+        # gate so it can detect off-topic results.
+        top_score = 0.0
+        if state.documents:
+            top_score = float(
+                state.documents[0].metadata.get("_rankingScore", 0.0) or 0.0
+            )
+        if (
+            state.iterations <= 1
+            and len(state.documents) >= self.top_k
+            and top_score >= 0.7
+        ):
             new = state.model_copy(update={"quality_ok": True})
-            self._trace(new, "quality_gate", t0, path="shortcut_topk", ok=True)
+            self._trace(
+                new,
+                "quality_gate",
+                t0,
+                path="shortcut_topk",
+                ok=True,
+                top_score=top_score,
+            )
             return new
 
         # Iter 1: strict quality assessment — no shortcut.
