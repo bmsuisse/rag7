@@ -266,9 +266,7 @@ class RAGTuner:
                 semantic_ratio=trial.suggest_float("semantic_ratio", 0.3, 0.9),
                 fusion=trial.suggest_categorical("fusion", ["rrf", "dbsf"]),
                 hyde_min_words=_opt_int(trial, "hyde_min_words", 4, 12),
-                short_query_threshold=trial.suggest_int(
-                    "short_query_threshold", 3, 8
-                ),
+                short_query_threshold=trial.suggest_int("short_query_threshold", 3, 8),
                 short_query_sort_tokens=trial.suggest_categorical(
                     "short_query_sort_tokens", [True, False]
                 ),
@@ -278,9 +276,7 @@ class RAGTuner:
                 bm25_fallback_semantic_ratio=trial.suggest_float(
                     "bm25_fallback_semantic_ratio", 0.7, 1.0
                 ),
-                fast_accept_score=_opt_float(
-                    trial, "fast_accept_score", 0.5, 0.95
-                ),
+                fast_accept_score=_opt_float(trial, "fast_accept_score", 0.5, 0.95),
                 fast_accept_confidence=_opt_float(
                     trial, "fast_accept_confidence", 0.6, 0.95
                 ),
@@ -291,9 +287,7 @@ class RAGTuner:
                 name_field_boost_max=trial.suggest_float(
                     "name_field_boost_max", 0.0, 0.5
                 ),
-                expert_threshold=_opt_float(
-                    trial, "expert_threshold", 0.05, 0.3
-                ),
+                expert_threshold=_opt_float(trial, "expert_threshold", 0.05, 0.3),
                 enable_hyde=trial.suggest_categorical("enable_hyde", [True, False]),
                 enable_filter_intent=trial.suggest_categorical(
                     "enable_filter_intent", [True, False]
@@ -312,9 +306,7 @@ class RAGTuner:
                     else baseline.strong_model
                 ),
                 weak_model=(
-                    trial.suggest_categorical(
-                        "weak_model", list(self.candidate_models)
-                    )
+                    trial.suggest_categorical("weak_model", list(self.candidate_models))
                     if self.candidate_models
                     else baseline.weak_model
                 ),
