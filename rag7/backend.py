@@ -201,18 +201,25 @@ class MeilisearchBackend(SearchBackend):
         # visible error, which is hard to debug (looks like "DE dominates
         # the multi-collection search" when the FR backend actually points
         # at a non-existent index).
+        # ``fetch_info()`` works with search-scoped API keys and fails only
+        # on actually-missing indexes. ``get_stats()`` would need an admin
+        # key and gave false positives on valid indexes.
         try:
-            self._client.index(index).get_stats()
-        except Exception as e:  # noqa: BLE001 — network/404/any failure mode
-            import warnings
+            self._client.index(index).fetch_info()
+        except Exception as e:  # noqa: BLE001 — missing index / network / etc.
+            msg = str(e).lower()
+            # Only warn for "not found" errors — other failures (auth, network)
+            # are separate concerns the user will hit on the next call anyway.
+            if "not found" in msg or "index_not_found" in msg:
+                import warnings
 
-            warnings.warn(
-                f"Meilisearch index {index!r} could not be reached "
-                f"({type(e).__name__}). Searches against this backend will "
-                f"return empty. Check the index name / url / key.",
-                RuntimeWarning,
-                stacklevel=2,
-            )
+                warnings.warn(
+                    f"Meilisearch index {index!r} does not exist on "
+                    f"{self._client.config.url}. Searches against this "
+                    f"backend will return empty. Check the index name.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
 
     @property
     def client(self) -> Any:
