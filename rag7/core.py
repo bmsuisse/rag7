@@ -904,7 +904,12 @@ class AgenticRAG:
                 self._short_query_threshold = int(config["short_query_threshold"])
             # Token sort is cheap and paraphrase-invariant — always on.
             self._short_query_sort_tokens = True
-            print(f"  [{self.index}] strategy ({source}): {config}")
+            label = (
+                ",".join(sorted(self.collections.keys()))
+                if self.collections
+                else self.index
+            )
+            print(f"  [{label}] strategy ({source}): {config}")
         except Exception as e:
             print(f"  [{self.index}] auto-strategy failed ({e}), using defaults")
 
@@ -974,7 +979,14 @@ class AgenticRAG:
             filterable = sorted(self.backend.get_index_config().filterable_attributes)
         except Exception:
             filterable = []
-        raw = f"{self.index}|{','.join(doc_keys)}|{','.join(filterable)}"
+        # In multi-collection mode the primary self.index is only the first
+        # name; include every configured collection so the cache keys a
+        # different strategy per (DE,FR) union vs. DE alone.
+        if self.collections:
+            index_sig = ",".join(sorted(self.collections.keys()))
+        else:
+            index_sig = self.index
+        raw = f"{index_sig}|{','.join(doc_keys)}|{','.join(filterable)}"
         return hashlib.sha1(raw.encode()).hexdigest()[:12]
 
     def _sys(self, prompt: str) -> SystemMessage:

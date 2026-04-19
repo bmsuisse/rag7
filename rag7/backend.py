@@ -196,6 +196,23 @@ class MeilisearchBackend(SearchBackend):
             url or os.getenv("MEILI_URL", "http://localhost:7700"),
             api_key or os.getenv("MEILI_KEY", "masterKey"),
         )
+        # Early-warn on typo'd index names. A missing index is a 404 that
+        # search() silently swallows — yields empty results rather than a
+        # visible error, which is hard to debug (looks like "DE dominates
+        # the multi-collection search" when the FR backend actually points
+        # at a non-existent index).
+        try:
+            self._client.index(index).get_stats()
+        except Exception as e:  # noqa: BLE001 — network/404/any failure mode
+            import warnings
+
+            warnings.warn(
+                f"Meilisearch index {index!r} could not be reached "
+                f"({type(e).__name__}). Searches against this backend will "
+                f"return empty. Check the index name / url / key.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
 
     @property
     def client(self) -> Any:
