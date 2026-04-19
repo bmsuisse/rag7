@@ -2240,13 +2240,25 @@ class AgenticRAG:
         # token (year/version), or uppercase code. Embedded digits (bm25, oauth2)
         # are technical jargon, not entities — don't count them.
         words = question.strip().split()
-        has_entity_signal = any(
+        # Language-agnostic filter-intent words (from/by/without) in
+        # German/French/English. Any occurrence alongside a content word
+        # is a strong filter signal.
+        _FILTER_INTENT_WORDS = {
+            "von", "aus", "ohne", "nicht", "für", "fur", "bei",
+            "de", "du", "sans", "pour", "par",
+            "from", "without", "not", "for", "by", "of",
+        }
+        has_capital_signal = any(
             (i > 0 and w and w[0].isupper() and not w.isupper())
             or (w and w[0].isdigit())
             or (len(w) >= 3 and w.isupper())
             for i, w in enumerate(words)
         )
-        if not has_entity_signal:
+        has_filter_word = any(w.lower() in _FILTER_INTENT_WORDS for w in words)
+        # Run LLM when we have a clear signal OR the query is long enough
+        # (4+ words) that lowercase brand/entity mentions are likely.
+        # Under 4 words without signals → keyword bag, skip LLM.
+        if not (has_capital_signal or has_filter_word or len(words) >= 4):
             return FilterIntent(field=None, value="", operator="")
 
         cached = _cache.load("filter-intent-v5", tuple(filterable), question)
