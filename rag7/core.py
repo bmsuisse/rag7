@@ -802,7 +802,7 @@ class AgenticRAG:
         """
         try:
             sample = self.backend.sample_documents(
-                limit=5,
+                limit=15,
                 filter_expr=self.filter,
             )
             if not sample:
@@ -884,12 +884,22 @@ class AgenticRAG:
                 self.semantic_ratio = float(config["semantic_ratio"])
             if "fusion" in config and config["fusion"] in ("rrf", "dbsf"):
                 self.fusion = config["fusion"]
+            # Post-LLM heuristic: when vector weight is meaningful, DBSF's
+            # distribution-based normalization beats RRF — BM25 and vector
+            # score ranges differ too much for rank-only fusion to handle
+            # well. LLM tends to default to 'rrf'; correct that here.
+            if self.semantic_ratio >= 0.35:
+                self.fusion = "dbsf"
             if "enable_filter_intent" in config:
                 self._enable_filter_intent = bool(config["enable_filter_intent"])
             if "enable_preprocess_llm" in config:
                 self._enable_preprocess_llm = bool(config["enable_preprocess_llm"])
             if "short_query_threshold" in config:
                 self._short_query_threshold = int(config["short_query_threshold"])
+            # Belt-and-braces: always keep short-query token sort on. It's
+            # cheap, paraphrase-invariant, and helps more than it hurts
+            # even when the LLM preprocess is also active.
+            self._short_query_sort_tokens = True
             print(f"  [{self.index}] strategy ({source}): {config}")
         except Exception as e:
             print(f"  [{self.index}] auto-strategy failed ({e}), using defaults")
