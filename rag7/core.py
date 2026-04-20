@@ -245,6 +245,52 @@ def _align_embed_fn_with_backend(
     return _adapt_embed_fn_to_dim(embed_fn, target)
 
 
+_FILTER_INTENT_WORDS = frozenset(
+    {
+        # German
+        "von",
+        "vom",
+        "aus",
+        "ohne",
+        "nicht",
+        "kein",
+        "keine",
+        "für",
+        "fur",
+        "bei",
+        "mit",
+        # French
+        "de",
+        "du",
+        "des",
+        "sans",
+        "pour",
+        "par",
+        "pas",
+        "avec",
+        "chez",
+        # Italian
+        "di",
+        "da",
+        "del",
+        "della",
+        "senza",
+        "non",
+        "per",
+        "con",
+        # English
+        "from",
+        "without",
+        "not",
+        "no",
+        "for",
+        "by",
+        "of",
+        "with",
+    }
+)
+
+
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
 
 
@@ -1337,8 +1383,17 @@ class AgenticRAG:
             )
             self._trace(new, "preprocess", t0, path="disabled", query=raw)
             return new
-        # Short, keyword-like questions don't benefit from LLM rewrite: skip the call.
-        if len(state.question.split()) <= self._short_query_threshold:
+        # Short, keyword-like questions usually don't benefit from LLM
+        # rewrite — but when a short query contains a filter-intent word
+        # (von / de / from / ohne / sans / ...) it likely has a brand or
+        # category filter that needs synonym expansion to reach the
+        # target (e.g. "bieröffner von proone" → needs "flaschenöffner"
+        # variant). In that case fall through to the LLM path.
+        words = state.question.split()
+        has_filter_word = any(
+            w.lower().strip("?,!.") in _FILTER_INTENT_WORDS for w in words
+        )
+        if len(words) <= self._short_query_threshold and not has_filter_word:
             raw = _strip_stop_words(state.question) or state.question
             # Normalize token order for product-name queries so paraphrase variants
             # ("Sand gewaschen 0-4mm" vs "Sand 0-4mm gewaschen") resolve to the
