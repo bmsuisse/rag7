@@ -643,28 +643,88 @@ def run_chat(
     question: str,
     history: list[ConversationTurn],
 ) -> ConversationTurn | None:
-    if _HAS_RICH:
-        with _console.status("[bold green]Thinking...[/bold green]", spinner="dots"):
-            state = rag.chat(question, history)
+    """Streaming chat: tokens print as the generation LLM emits them.
+
+    Uses `rag.astream` which calls `_aretrieve_documents` (unified retrieval
+    with filter-pin, variants, etc.) then streams the generation — better
+    time-to-first-token than ainvoke. History is folded into the question
+    as context so the retriever sees the full dialogue.
+    """
+    import asyncio as _asyncio
+
+    if history:
+        history_ctx = "\n".join(
+            f"Previous Q: {t.question}\nPrevious A: {t.answer[:400]}"
+            for t in history[-3:]
+        )
+        contextualized = f"{history_ctx}\n\nNew question: {question}"
     else:
-        print("Thinking...")
-        state = rag.chat(question, history)
+        contextualized = question
 
-    # LangGraph ainvoke may return a dict at runtime despite the type hint.
-    get = (
-        state.get if isinstance(state, dict) else lambda k, d=None: getattr(state, k, d)
-    )
-    answer = get("answer") or ""
-    docs = get("documents") or []
-    query = get("query") or question
+    async def _collect() -> tuple[str, list[Any], bool]:
+        _, docs = await rag._aretrieve_documents(contextualized)
+        # Grader: before streaming an answer, confirm the top docs are
+        # actually relevant to the question. Warns the user when context
+        # is weak instead of letting the LLM confabulate.
+        grader_ok = True
+        try:
+            rc = await rag._arelevance_check(question, docs)
+            grader_ok = rc.makes_sense and rc.confidence >= 0.5
+        except Exception:
+            grader_ok = True  # grader failure shouldn't block the answer
+        if not grader_ok:
+            _print(
+                "  [yellow]Note:[/yellow] the retrieved context may not "
+                "directly answer the question."
+                if _HAS_RICH
+                else "  Note: retrieved context may not directly answer the question."
+            )
+        numbered = "\n\n---\n\n".join(
+            f"[{i + 1}] {d.page_content}" for i, d in enumerate(docs[: rag.top_k])
+        )
+        from langchain_core.messages import HumanMessage as _HM
 
-    _print(f"\n  Search query: {query}")
+        messages: list[Any] = [
+            rag._sys(
+                "Answer using only the provided context. "
+                "Cite sources inline using [n] numbers matching the context blocks. "
+                "Say so if the context is insufficient."
+            ),
+            _HM(f"Context:\n{numbered}\n\nQuestion: {question}"),
+        ]
+        _print("\n  [bold]Answer:[/bold]" if _HAS_RICH else "\n  Answer:")
+        parts: list[str] = []
+        async for chunk in rag._gen_llm.astream(messages):
+            content = getattr(chunk, "content", None)
+            if content:
+                text = str(content)
+                parts.append(text)
+                sys.stdout.write(text)
+                sys.stdout.flush()
+        sys.stdout.write("\n")
+        return "".join(parts), docs, grader_ok
+
+    try:
+        answer, docs, _grader_ok = _asyncio.run(_collect())
+    except Exception as exc:
+        _print(f"[bold red]Error:[/bold red] {exc}")
+        return None
+
+    query = question  # preprocessed query not surfaced in streaming path
+    _print(f"\n  [dim]Search query:[/dim] {query}")
 
     if not answer:
         _print("  No answer generated.")
         return None
 
-    render_answer(answer, docs)
+    if docs and _HAS_RICH:
+        from rich.rule import Rule
+
+        _console.print(Rule("Sources"))
+        for i, d in enumerate(docs[: rag.top_k], 1):
+            snippet = d.page_content[:80].replace("\n", " ")
+            _print(f"  [{i}] {snippet}…")
+
     return ConversationTurn(question=question, answer=answer)
 
 
