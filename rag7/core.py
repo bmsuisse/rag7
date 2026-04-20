@@ -245,6 +245,52 @@ def _align_embed_fn_with_backend(
     return _adapt_embed_fn_to_dim(embed_fn, target)
 
 
+_FILTER_INTENT_WORDS = frozenset(
+    {
+        # German
+        "von",
+        "vom",
+        "aus",
+        "ohne",
+        "nicht",
+        "kein",
+        "keine",
+        "für",
+        "fur",
+        "bei",
+        "mit",
+        # French
+        "de",
+        "du",
+        "des",
+        "sans",
+        "pour",
+        "par",
+        "pas",
+        "avec",
+        "chez",
+        # Italian
+        "di",
+        "da",
+        "del",
+        "della",
+        "senza",
+        "non",
+        "per",
+        "con",
+        # English
+        "from",
+        "without",
+        "not",
+        "no",
+        "for",
+        "by",
+        "of",
+        "with",
+    }
+)
+
+
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
 
 
@@ -253,8 +299,15 @@ def _clean_string(s: str) -> str:
     return re.sub(r"\s+", " ", _HTML_TAG_RE.sub(" ", s)).strip()
 
 
+_MAX_LIST_ITEMS = 8
+"""Cap bulky list values (stock_data per-warehouse, etc.) at this many
+items when rendering for the reranker. Spec lists like akeneo_values
+rarely exceed this count; warehouse/location arrays can be 20+ and
+would otherwise push downstream fields past the rerank_chars cutoff."""
+
+
 def _render_value(v: Any, indent: int = 0) -> str:
-    """Markdown renderer: bold labels, flat bullets, HTML stripped.
+    """Markdown renderer: bold labels, flat bullets, HTML stripped, lists capped.
 
     Markdown beat YAML and JSON on reranker accuracy in our eval
     (+1 hit over YAML, +2 over JSON). Returns empty when the value
@@ -277,7 +330,9 @@ def _render_value(v: Any, indent: int = 0) -> str:
         return "\n".join(lines)
     if isinstance(v, (list, tuple)):
         lines = []
-        for item in v:
+        items = list(v)
+        truncated = len(items) > _MAX_LIST_ITEMS
+        for item in items[:_MAX_LIST_ITEMS]:
             if (
                 isinstance(item, (list, tuple))
                 and len(item) == 2
@@ -294,6 +349,8 @@ def _render_value(v: Any, indent: int = 0) -> str:
                 rendered = _render_value(item, indent + 1)
                 if rendered:
                     lines.append(f"- {rendered}")
+        if truncated:
+            lines.append(f"- (…{len(items) - _MAX_LIST_ITEMS} more)")
         return "\n".join(lines)
     return _clean_string(str(v))
 
@@ -1211,26 +1268,26 @@ class AgenticRAG:
         improvingagents.com/blog/best-nested-data-format, YAML>JSON>XML).
         """
         content = h.get("content")
-        # Pre-render everything, then emit smallest → largest so the
-        # reranker's rerank_chars window always catches short dense fields
-        # (article_name, supplier, category, search terms, specs) before
-        # bulky ones (stock_data per-warehouse lists). Without this
-        # ordering, a doc's payload gets truncated inside the wrong field
-        # — e.g. 7794905 ProOne Multi-Tool has "Flaschenöffner" buried at
-        # char 20795 inside akeneo_values, past the default 2048-char cap.
+        # Render every field, then emit shortest → longest so the
+        # reranker's rerank_chars window catches short dense fields
+        # (article_name, supplier, category, search terms, spec pairs)
+        # before any remaining bulky ones. List values are already capped
+        # at _MAX_LIST_ITEMS, but ordering still matters: without it, e.g.
+        # akeneo_values ends up after stock_data in dict insertion order
+        # and search-relevant spec content gets truncated.
         rendered_items: list[tuple[int, str]] = []
         for k, v in h.items():
             if k in _SKIP_FIELDS or k == "content" or v is None or v == "":
                 continue
-            r = _render_value(v, indent=0)
-            if not r:
+            rendered = _render_value(v, indent=0)
+            if not rendered:
                 continue
-            if isinstance(v, str) and content and r in content:
+            if isinstance(v, str) and content and rendered in content:
                 continue
-            if isinstance(v, str) or "\n" not in r:
-                line = f"**{k}**: {r}"
+            if isinstance(v, str) or "\n" not in rendered:
+                line = f"**{k}**: {rendered}"
             else:
-                line = f"**{k}**:\n{r}"
+                line = f"**{k}**:\n{rendered}"
             rendered_items.append((len(line), line))
         extras = [line for _, line in sorted(rendered_items, key=lambda x: x[0])]
         if content and not extras:
@@ -1326,8 +1383,17 @@ class AgenticRAG:
             )
             self._trace(new, "preprocess", t0, path="disabled", query=raw)
             return new
-        # Short, keyword-like questions don't benefit from LLM rewrite: skip the call.
-        if len(state.question.split()) <= self._short_query_threshold:
+        # Short, keyword-like questions usually don't benefit from LLM
+        # rewrite — but when a short query contains a filter-intent word
+        # (von / de / from / ohne / sans / ...) it likely has a brand or
+        # category filter that needs synonym expansion to reach the
+        # target (e.g. "bieröffner von proone" → needs "flaschenöffner"
+        # variant). In that case fall through to the LLM path.
+        words = state.question.split()
+        has_filter_word = any(
+            w.lower().strip("?,!.") in _FILTER_INTENT_WORDS for w in words
+        )
+        if len(words) <= self._short_query_threshold and not has_filter_word:
             raw = _strip_stop_words(state.question) or state.question
             # Normalize token order for product-name queries so paraphrase variants
             # ("Sand gewaschen 0-4mm" vs "Sand 0-4mm gewaschen") resolve to the
@@ -1702,44 +1768,26 @@ class AgenticRAG:
         return new
 
     async def _aretrieve_node(self, state: RAGState) -> RAGState:
+        """Delegate to _aretrieve_documents so chat and --retriever share one pipeline.
+
+        Keeps the graph's iteration/rewrite loop functional: each iteration
+        asks for a larger pool so the LLM rewrite path has fresh candidates.
+        The returned docs are already reranked — downstream rerank is idempotent.
+        """
         t0 = time.perf_counter()
         factor = (
             self.retrieval_factor * 2
             if state.iterations >= 1
             else self.retrieval_factor
         )
-        intent: FilterIntent | None = state.filter_intent
-        broad_coro = self._asearch(
-            state.query,
-            question=state.question,
-            extra_bm25=state.query_variants,
-            factor=factor,
-            adaptive_semantic_ratio=state.adaptive_semantic_ratio,
-            adaptive_fusion=state.adaptive_fusion,
-        )
-        if state.iterations == 0:
-            (broad_docs, _bm25_empty), (intent, filter_docs) = await asyncio.gather(
-                broad_coro,
-                self._afilter_search_with_intent(
-                    state.question,
-                    state.query,
-                    precomputed=intent,
-                    variants=state.query_variants,
-                ),
-            )
-            if filter_docs and len(filter_docs) >= self.top_k:
-                docs = filter_docs
-            elif filter_docs:
-                docs = self._merge_doc_lists(filter_docs, broad_docs)
-            else:
-                docs = broad_docs
-        else:
-            docs, _bm25_empty = await broad_coro
+        pool = max(self.top_k * factor, self.rerank_top_n * 4)
+        query, docs = await self._aretrieve_documents(state.question, top_k=pool)
         new = state.model_copy(
             update={
+                "query": query,
                 "documents": docs,
                 "iterations": state.iterations + 1,
-                "filter_intent": intent,
+                "pre_reranked": True,
             }
         )
         self._trace(
@@ -1749,7 +1797,7 @@ class AgenticRAG:
             iter=new.iterations,
             docs=len(docs),
             factor=factor,
-            filter_field=(intent.field if intent else None),
+            path="unified",
         )
         return new
 
@@ -1836,25 +1884,25 @@ class AgenticRAG:
             except Exception:
                 return []
 
-        # Brand queries: the user's brand name often matches both a subset
-        # of supplier_name values *and* own-brand SKUs that aren't literally
-        # supplied by that brand (e.g. ProOne-branded items with
-        # supplier_name="BME Strategic Services"). Run both filters in
-        # parallel and merge — neither alone covers the full brand set.
-        if self._has_own_brand_field and _is_brand_intent(intent):
-            brand_hits, own_brand_hits = await asyncio.gather(
-                _search(filter_expr),
-                _search("is_own_brand = true"),
-            )
-            seen: set[str] = set()
-            hits: list[dict] = []
-            for h in brand_hits + own_brand_hits:
+        # Try the literal brand filter first. Only fall back to an
+        # is_own_brand OR merge when the literal filter came back thin —
+        # otherwise for external-supplier brands like "Wedi", merging in
+        # own-brand hits dilutes recall with unrelated Bauplatte SKUs.
+        hits = await _search(filter_expr)
+        if (
+            self._has_own_brand_field
+            and _is_brand_intent(intent)
+            and len(hits) < self.top_k
+        ):
+            own_brand_hits = await _search("is_own_brand = true")
+            seen: set[str] = {
+                str(h.get("id") or h.get("article_id") or id(h)) for h in hits
+            }
+            for h in own_brand_hits:
                 doc_id = str(h.get("id") or h.get("article_id") or id(h))
                 if doc_id not in seen:
                     seen.add(doc_id)
                     hits.append(h)
-        else:
-            hits = await _search(filter_expr)
         return [
             Document(page_content=self._hit_to_text(h), metadata=h)
             for h in hits[:limit]
@@ -2003,6 +2051,11 @@ class AgenticRAG:
     async def _arerank(self, state: RAGState) -> RAGState:
         t0 = time.perf_counter()
         if not state.documents:
+            return state
+        if state.pre_reranked:
+            # Graph path already ran the full retriever pipeline (which
+            # includes rerank + filter-pin); don't second-guess it.
+            self._trace(state, "rerank", t0, skipped="pre_reranked")
             return state
         # Selective skip: confident query + no filter intent + no expert → hybrid order good enough
         if (
@@ -2937,6 +2990,35 @@ class AgenticRAG:
         except Exception:
             return all_names
 
+    def _pin_filter_top(
+        self,
+        ranked: list[Document],
+        filter_docs: list[Document],
+        pin_to: int = 3,
+    ) -> list[Document]:
+        """Ensure the top ``pin_to`` filter_docs are in the final top ``pin_to``.
+
+        Cohere sometimes demotes exact filter hits below reranker-favoured
+        siblings. When a filter fired with a confident value, trust it:
+        promote filter_docs rank-0 (and rank-1, rank-2) into top-3 of the
+        ranked output while keeping overall Cohere order for everything else.
+        Returns the same object if no change was needed (cheap check).
+        """
+        if not ranked or not filter_docs:
+            return ranked
+        ranked_ids = [_doc_id(d.metadata) for d in ranked]
+        want_ids = [_doc_id(d.metadata) for d in filter_docs[:pin_to]]
+        need = [wid for wid in want_ids if wid not in set(ranked_ids[:pin_to])]
+        if not need:
+            return ranked
+        # Rebuild: filter_docs top that are missing from ranked top, then
+        # preserve reranker order excluding duplicates.
+        id_to_doc: dict[str, Document] = {_doc_id(d.metadata): d for d in filter_docs}
+        for d in ranked:
+            id_to_doc.setdefault(_doc_id(d.metadata), d)
+        promoted_ids = [*need, *(rid for rid in ranked_ids if rid not in set(need))]
+        return [id_to_doc[i] for i in promoted_ids]
+
     def _merge_doc_lists(self, *doc_lists: list[Document]) -> list[Document]:
         raw = [[d.metadata for d in dl] for dl in doc_lists]
         fused_meta = _rrf_fuse(raw)
@@ -3103,14 +3185,22 @@ class AgenticRAG:
         init = RAGState(question=query, query=query)
         preprocess_task = asyncio.create_task(self._apreprocess(init))
         hyde_task = asyncio.create_task(self._acompute_hyde(query))
+        # Intent DETECTION fires in parallel with preprocess — the LLM call
+        # is ~1-2s and independent of query rewrite. Filter SEARCH still
+        # waits for preprocess so it can use the LLM's query_variants.
+        intent_detect_task = asyncio.create_task(self._adetect_filter_intent(query))
         state = await preprocess_task
+        try:
+            intent = await intent_detect_task
+        except Exception:
+            intent = None
 
-        # Fire filter+intent search AFTER preprocess so query_variants can
-        # propagate — the raw query alone often misses (e.g. "bieröffner"
-        # without its LLM-generated "flaschenöffner" variant).
         filter_intent_task = asyncio.create_task(
             self._afilter_search_with_intent(
-                query, state.query, variants=state.query_variants
+                query,
+                state.query,
+                precomputed=intent,
+                variants=state.query_variants,
             )
         )
 
@@ -3146,8 +3236,9 @@ class AgenticRAG:
         # Broad search alone doesn't include those, and cancelling the
         # filter task drops them silently.
         filter_docs: list[Document] = []
+        filter_intent_result: FilterIntent | None = None
         try:
-            _, filter_docs = await filter_intent_task
+            filter_intent_result, filter_docs = await filter_intent_task
         except Exception:
             pass
         # A strong filter signal (e.g. supplier = ProOne + own-brand
@@ -3175,6 +3266,20 @@ class AgenticRAG:
         if not state.documents or (bm25_empty and not filter_docs):
             state = await self._aswarm_retrieve(state)
         state = await self._arerank(state)
+        # When a confident filter fired (brand / supplier / category with
+        # a specific value), ensure filter_docs[0] lands in the final
+        # top-3 — Cohere sometimes demotes the exact filter hit in favor
+        # of other reranker-pleasing docs in the same brand pool. Trust
+        # the filter signal for cross-brand queries.
+        if (
+            filter_docs
+            and filter_intent_result is not None
+            and filter_intent_result.field
+            and filter_intent_result.value
+        ):
+            ranked = self._pin_filter_top(state.documents, filter_docs)
+            if ranked is not state.documents:
+                state = state.model_copy(update={"documents": ranked})
         return state.query, state.documents[:k]
 
     def retrieve_documents(

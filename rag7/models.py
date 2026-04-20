@@ -53,6 +53,7 @@ class RAGState(BaseModel):
     alternative_to: str | None = None
     selected_collections: list[str] = Field(default_factory=list)
     expert_fired: bool = False
+    pre_reranked: bool = False
     trace: list[dict[str, Any]] = Field(default_factory=list)
 
 
