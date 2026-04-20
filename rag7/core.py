@@ -1211,21 +1211,28 @@ class AgenticRAG:
         improvingagents.com/blog/best-nested-data-format, YAML>JSON>XML).
         """
         content = h.get("content")
-        extras: list[str] = []
+        # Pre-render everything, then emit smallest → largest so the
+        # reranker's rerank_chars window always catches short dense fields
+        # (article_name, supplier, category, search terms, specs) before
+        # bulky ones (stock_data per-warehouse lists). Without this
+        # ordering, a doc's payload gets truncated inside the wrong field
+        # — e.g. 7794905 ProOne Multi-Tool has "Flaschenöffner" buried at
+        # char 20795 inside akeneo_values, past the default 2048-char cap.
+        rendered_items: list[tuple[int, str]] = []
         for k, v in h.items():
             if k in _SKIP_FIELDS or k == "content" or v is None or v == "":
                 continue
-            rendered = _render_value(v, indent=0)
-            if not rendered:
+            r = _render_value(v, indent=0)
+            if not r:
                 continue
-            if isinstance(v, str):
-                if content and rendered in content:
-                    continue
-                extras.append(f"**{k}**: {rendered}")
-            elif "\n" in rendered:
-                extras.append(f"**{k}**:\n{rendered}")
+            if isinstance(v, str) and content and r in content:
+                continue
+            if isinstance(v, str) or "\n" not in r:
+                line = f"**{k}**: {r}"
             else:
-                extras.append(f"**{k}**: {rendered}")
+                line = f"**{k}**:\n{r}"
+            rendered_items.append((len(line), line))
+        extras = [line for _, line in sorted(rendered_items, key=lambda x: x[0])]
         if content and not extras:
             return str(content)
         if content:
