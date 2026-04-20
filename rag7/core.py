@@ -1211,13 +1211,12 @@ class AgenticRAG:
         improvingagents.com/blog/best-nested-data-format, YAML>JSON>XML).
         """
         content = h.get("content")
-        # Pre-render everything, then emit smallest → largest so the
+        # Pre-render every field, then emit smallest → largest so the
         # reranker's rerank_chars window always catches short dense fields
         # (article_name, supplier, category, search terms, specs) before
-        # bulky ones (stock_data per-warehouse lists). Without this
-        # ordering, a doc's payload gets truncated inside the wrong field
-        # — e.g. 7794905 ProOne Multi-Tool has "Flaschenöffner" buried at
-        # char 20795 inside akeneo_values, past the default 2048-char cap.
+        # bulky ones (stock_data per-warehouse lists). Without this the
+        # payload gets truncated inside the wrong field — e.g. ProOne
+        # Multi-Tool had "Flaschenöffner" buried past the 2048-char cap.
         rendered_items: list[tuple[int, str]] = []
         for k, v in h.items():
             if k in _SKIP_FIELDS or k == "content" or v is None or v == "":
@@ -1702,44 +1701,25 @@ class AgenticRAG:
         return new
 
     async def _aretrieve_node(self, state: RAGState) -> RAGState:
+        """Delegate to _aretrieve_documents so chat and --retriever share one pipeline.
+
+        Keeps the graph's iteration/rewrite loop functional: each iteration
+        asks for a larger pool so the LLM rewrite path has fresh candidates.
+        The returned docs are already reranked — downstream rerank is idempotent.
+        """
         t0 = time.perf_counter()
         factor = (
             self.retrieval_factor * 2
             if state.iterations >= 1
             else self.retrieval_factor
         )
-        intent: FilterIntent | None = state.filter_intent
-        broad_coro = self._asearch(
-            state.query,
-            question=state.question,
-            extra_bm25=state.query_variants,
-            factor=factor,
-            adaptive_semantic_ratio=state.adaptive_semantic_ratio,
-            adaptive_fusion=state.adaptive_fusion,
-        )
-        if state.iterations == 0:
-            (broad_docs, _bm25_empty), (intent, filter_docs) = await asyncio.gather(
-                broad_coro,
-                self._afilter_search_with_intent(
-                    state.question,
-                    state.query,
-                    precomputed=intent,
-                    variants=state.query_variants,
-                ),
-            )
-            if filter_docs and len(filter_docs) >= self.top_k:
-                docs = filter_docs
-            elif filter_docs:
-                docs = self._merge_doc_lists(filter_docs, broad_docs)
-            else:
-                docs = broad_docs
-        else:
-            docs, _bm25_empty = await broad_coro
+        pool = max(self.top_k * factor, self.rerank_top_n * 4)
+        query, docs = await self._aretrieve_documents(state.question, top_k=pool)
         new = state.model_copy(
             update={
+                "query": query,
                 "documents": docs,
                 "iterations": state.iterations + 1,
-                "filter_intent": intent,
             }
         )
         self._trace(
@@ -1749,7 +1729,7 @@ class AgenticRAG:
             iter=new.iterations,
             docs=len(docs),
             factor=factor,
-            filter_field=(intent.field if intent else None),
+            path="unified",
         )
         return new
 
@@ -1836,25 +1816,25 @@ class AgenticRAG:
             except Exception:
                 return []
 
-        # Brand queries: the user's brand name often matches both a subset
-        # of supplier_name values *and* own-brand SKUs that aren't literally
-        # supplied by that brand (e.g. ProOne-branded items with
-        # supplier_name="BME Strategic Services"). Run both filters in
-        # parallel and merge — neither alone covers the full brand set.
-        if self._has_own_brand_field and _is_brand_intent(intent):
-            brand_hits, own_brand_hits = await asyncio.gather(
-                _search(filter_expr),
-                _search("is_own_brand = true"),
-            )
-            seen: set[str] = set()
-            hits: list[dict] = []
-            for h in brand_hits + own_brand_hits:
+        # Try the literal brand filter first. Only fall back to an
+        # is_own_brand OR merge when the literal filter came back thin —
+        # otherwise for external-supplier brands like "Wedi", merging in
+        # own-brand hits dilutes recall with unrelated Bauplatte SKUs.
+        hits = await _search(filter_expr)
+        if (
+            self._has_own_brand_field
+            and _is_brand_intent(intent)
+            and len(hits) < self.top_k
+        ):
+            own_brand_hits = await _search("is_own_brand = true")
+            seen: set[str] = {
+                str(h.get("id") or h.get("article_id") or id(h)) for h in hits
+            }
+            for h in own_brand_hits:
                 doc_id = str(h.get("id") or h.get("article_id") or id(h))
                 if doc_id not in seen:
                     seen.add(doc_id)
                     hits.append(h)
-        else:
-            hits = await _search(filter_expr)
         return [
             Document(page_content=self._hit_to_text(h), metadata=h)
             for h in hits[:limit]

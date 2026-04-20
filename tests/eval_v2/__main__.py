@@ -42,6 +42,20 @@ ONETRADE_DE_HITS: list[HIT_CASE] = [
     # bestseller like Trockenbeton. Tests the quality-gate score floor
     # + _hit_to_text structured-field expansion together.
     ("bieröffner von proone", ["1050541", "7794905"], "article_id"),
+    # Natural-language variant: the user's real wording, tests that the
+    # brand-filter + variants + own-brand OR filter together reach a doc
+    # whose searchable name/search_term contains neither "bieröffner" nor
+    # "flaschenöffner" (the latter sits in akeneo_values).
+    (
+        "haben wir bieröffner von proone?",
+        ["1050541", "7794905"],
+        "article_id",
+    ),
+    (
+        "proone tool mit flaschenöffner",
+        ["1050541", "7794905"],
+        "article_id",
+    ),
 ]
 
 ARTICLE_HITS: list[HIT_CASE] = [
