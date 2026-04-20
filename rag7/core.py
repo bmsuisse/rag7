@@ -2984,6 +2984,35 @@ class AgenticRAG:
         except Exception:
             return all_names
 
+    def _pin_filter_top(
+        self,
+        ranked: list[Document],
+        filter_docs: list[Document],
+        pin_to: int = 3,
+    ) -> list[Document]:
+        """Ensure the top ``pin_to`` filter_docs are in the final top ``pin_to``.
+
+        Cohere sometimes demotes exact filter hits below reranker-favoured
+        siblings. When a filter fired with a confident value, trust it:
+        promote filter_docs rank-0 (and rank-1, rank-2) into top-3 of the
+        ranked output while keeping overall Cohere order for everything else.
+        Returns the same object if no change was needed (cheap check).
+        """
+        if not ranked or not filter_docs:
+            return ranked
+        ranked_ids = [_doc_id(d.metadata) for d in ranked]
+        want_ids = [_doc_id(d.metadata) for d in filter_docs[:pin_to]]
+        need = [wid for wid in want_ids if wid not in set(ranked_ids[:pin_to])]
+        if not need:
+            return ranked
+        # Rebuild: filter_docs top that are missing from ranked top, then
+        # preserve reranker order excluding duplicates.
+        id_to_doc: dict[str, Document] = {_doc_id(d.metadata): d for d in filter_docs}
+        for d in ranked:
+            id_to_doc.setdefault(_doc_id(d.metadata), d)
+        promoted_ids = [*need, *(rid for rid in ranked_ids if rid not in set(need))]
+        return [id_to_doc[i] for i in promoted_ids]
+
     def _merge_doc_lists(self, *doc_lists: list[Document]) -> list[Document]:
         raw = [[d.metadata for d in dl] for dl in doc_lists]
         fused_meta = _rrf_fuse(raw)
@@ -3201,8 +3230,9 @@ class AgenticRAG:
         # Broad search alone doesn't include those, and cancelling the
         # filter task drops them silently.
         filter_docs: list[Document] = []
+        filter_intent_result: FilterIntent | None = None
         try:
-            _, filter_docs = await filter_intent_task
+            filter_intent_result, filter_docs = await filter_intent_task
         except Exception:
             pass
         # A strong filter signal (e.g. supplier = ProOne + own-brand
@@ -3230,6 +3260,20 @@ class AgenticRAG:
         if not state.documents or (bm25_empty and not filter_docs):
             state = await self._aswarm_retrieve(state)
         state = await self._arerank(state)
+        # When a confident filter fired (brand / supplier / category with
+        # a specific value), ensure filter_docs[0] lands in the final
+        # top-3 — Cohere sometimes demotes the exact filter hit in favor
+        # of other reranker-pleasing docs in the same brand pool. Trust
+        # the filter signal for cross-brand queries.
+        if (
+            filter_docs
+            and filter_intent_result is not None
+            and filter_intent_result.field
+            and filter_intent_result.value
+        ):
+            ranked = self._pin_filter_top(state.documents, filter_docs)
+            if ranked is not state.documents:
+                state = state.model_copy(update={"documents": ranked})
         return state.query, state.documents[:k]
 
     def retrieve_documents(
