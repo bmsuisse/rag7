@@ -2823,7 +2823,7 @@ class AgenticRAG:
                 question=query, query=query, documents=fast_docs, iterations=1
             )
             state = await self._arerank(state)
-            return state.query, state.documents[:k]
+            return state.query, await self._agate_top1(query, state.documents[:k])
 
         # Slow path: fan out preprocess, HyDE, filter-intent AND broad search in
         # parallel. Broad search uses the raw query/question — when preprocess
@@ -2898,7 +2898,31 @@ class AgenticRAG:
         if not state.documents:
             state = await self._aswarm_retrieve(state)
         state = await self._arerank(state)
-        return state.query, state.documents[:k]
+        return state.query, await self._agate_top1(query, state.documents[:k])
+
+    async def _agate_top1(self, query: str, docs: list[Document]) -> list[Document]:
+        """LLM grader gate: when top-1 BM25 score is low, judge whether
+        the top-1 doc actually answers the query. Returns [] if the
+        grader rejects — prevents confidently-wrong results on queries
+        that have no real match in the corpus (BM25 score ~0 + reranker
+        pick driven by commercial signal)."""
+        if not docs or not self._enable_quality_gate:
+            return docs
+        top_score = float(docs[0].metadata.get("_rankingScore", 0.0) or 0.0)
+        if top_score >= 0.3:
+            return docs
+        try:
+            judge = await self._arelevance_check(query, docs[:1])
+            # Trust the LLM's boolean judgment. The confidence field is
+            # strict (requires >=0.9 for a true answer) — for a low-score
+            # synonym-style match like "bieröffner" → "Flaschenöffner", the
+            # LLM is right to say makes_sense=True with ~0.6 confidence,
+            # and we should accept that.
+            if not judge.makes_sense:
+                return []
+        except Exception:
+            pass
+        return docs
 
     def retrieve_documents(
         self, query: str, top_k: int | None = None
