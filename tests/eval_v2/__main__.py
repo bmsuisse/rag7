@@ -56,6 +56,27 @@ ONETRADE_DE_HITS: list[HIT_CASE] = [
         ["1050541", "7794905"],
         "article_id",
     ),
+    # Natural-language queries — prose phrasing users actually type.
+    ("Akkuschrauber von Bosch", ["6260639", "5377125"], "article_id"),
+    ("Winkelschleifer Makita 125mm", ["1056160", "1056161"], "article_id"),
+    ("Schutzhelm in weiss", ["9137783", "1055431"], "article_id"),
+    ("Taschenmesser Victorinox", ["1143505"], "article_id"),
+    ("Stiel für einen Hammer", ["1055521", "1048808"], "article_id"),
+    ("Silikon schwarz Kartusche", ["1006780", "9251987"], "article_id"),
+    ("LED Taschenlampe mit USB", ["7779803"], "article_id"),
+    ("Werkzeugkoffer Aluminium", ["1147106", "7984433"], "article_id"),
+    ("Rohrzange Rothenberger", ["6204301", "1149577"], "article_id"),
+    # ProOne own-brand catalog coverage (pro-one.ch products).
+    ("ProOne Schuhreiniger Edi", ["9225388"], "article_id"),
+    ("ProOne Baustellenradio Rock One", ["9183348"], "article_id"),
+    ("ProOne Kartuschenpistole 225mm", ["1050095"], "article_id"),
+    ("ProOne Silikon Sanitär transparent", ["1003220"], "article_id"),
+    ("ProOne Elastisches Maleracryl weiss", ["8172012"], "article_id"),
+    ("ProOne Montageschaum 1K", ["8171999"], "article_id"),
+    # Natural-language synonym/brand-filter stress cases — these tend to
+    # need the LLM variants + brand filter to resolve.
+    ("Schaumpistole von ProOne", ["1050511", "7504843"], "article_id"),
+    ("Schuhputzer proone", ["9225388"], "article_id"),
 ]
 
 ARTICLE_HITS: list[HIT_CASE] = [
