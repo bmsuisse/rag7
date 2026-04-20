@@ -1363,7 +1363,16 @@ class AgenticRAG:
         adaptive_semantic_ratio: float | None = None,
         adaptive_fusion: str | None = None,
         hyde_text: str | None = None,
-    ) -> list[Document]:
+    ) -> tuple[list[Document], bool]:
+        """Return ``(docs, bm25_empty)``.
+
+        ``bm25_empty`` is True when every BM25-only arm (i.e. each request
+        without a vector) returned zero hits. That's the typo/OOV rescue
+        signal: the query terms literally aren't in the corpus, so the
+        caller should fall back to an LLM rewrite via ``_aswarm_retrieve``.
+        Pure vector hits can still fill ``docs`` with semantically-adjacent
+        noise, which we don't want to block the rescue.
+        """
         limit = int(self.top_k * (factor or self.retrieval_factor))
         hyde_source = question or query
 
@@ -1415,6 +1424,8 @@ class AgenticRAG:
                 seen.add(v)
 
         results = await loop.run_in_executor(None, self.backend.batch_search, requests)
+        bm25_arms = [r for req, r in zip(requests, results) if not req.vector]
+        bm25_empty = bool(bm25_arms) and all(len(r) == 0 for r in bm25_arms)
         fuse_method = adaptive_fusion or self.fusion
         if results:
             if fuse_method == "dbsf":
@@ -1428,10 +1439,11 @@ class AgenticRAG:
                 self._make_search_request(query, limit, filter_expr=lang_filter),
             )
 
-        return [
+        docs = [
             Document(page_content=self._hit_to_text(h), metadata=h)
             for h in fused[:limit]
         ]
+        return docs, bm25_empty
 
     async def _aroute_collections(self, state: RAGState) -> RAGState:
         if self.collections and not state.selected_collections:
@@ -1618,7 +1630,7 @@ class AgenticRAG:
             adaptive_fusion=state.adaptive_fusion,
         )
         if state.iterations == 0:
-            broad_docs, (intent, filter_docs) = await asyncio.gather(
+            (broad_docs, _bm25_empty), (intent, filter_docs) = await asyncio.gather(
                 broad_coro,
                 self._afilter_search_with_intent(
                     state.question, state.query, precomputed=intent
@@ -1631,7 +1643,7 @@ class AgenticRAG:
             else:
                 docs = broad_docs
         else:
-            docs = await broad_coro
+            docs, _bm25_empty = await broad_coro
         new = state.model_copy(
             update={
                 "documents": docs,
@@ -2880,7 +2892,7 @@ class AgenticRAG:
             else ref_text
         )
 
-        broad_docs = await self._asearch(
+        broad_docs, _ = await self._asearch(
             query,
             question=ref_text,
             factor=self.retrieval_factor,
@@ -2965,7 +2977,7 @@ class AgenticRAG:
         fb_th = self._bm25_fallback_threshold
         if fb_th is not None and top_score < fb_th and effective_semantic_ratio is None:
             effective_semantic_ratio = self._bm25_fallback_semantic_ratio
-        broad_docs = await self._asearch(
+        broad_docs, bm25_empty = await self._asearch(
             state.query,
             question=state.question,
             extra_bm25=state.query_variants,
@@ -3003,7 +3015,14 @@ class AgenticRAG:
         if fast_docs:
             docs = self._merge_doc_lists(docs, fast_docs)
         state = state.model_copy(update={"documents": docs, "iterations": 1})
-        if not state.documents:
+        # Typo/OOV rescue: every BM25 arm returned zero, so the query's
+        # literal tokens aren't in the corpus vocabulary. Vector hits may
+        # have filled `docs` with semantically-adjacent noise (especially
+        # when the query embedder differs from the ingest embedder), which
+        # would otherwise short-circuit the swarm path. Force the LLM
+        # rewrite so variants like "Flaschenöffner" for "bieröffner" get a
+        # chance to hit BM25.
+        if not state.documents or (bm25_empty and not filter_docs):
             state = await self._aswarm_retrieve(state)
         state = await self._arerank(state)
         return state.query, state.documents[:k]
