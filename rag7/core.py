@@ -2994,15 +2994,15 @@ class AgenticRAG:
         self,
         ranked: list[Document],
         filter_docs: list[Document],
-        pin_to: int = 3,
+        pin_to: int = 5,
     ) -> list[Document]:
         """Ensure the top ``pin_to`` filter_docs are in the final top ``pin_to``.
 
         Cohere sometimes demotes exact filter hits below reranker-favoured
         siblings. When a filter fired with a confident value, trust it:
-        promote filter_docs rank-0 (and rank-1, rank-2) into top-3 of the
-        ranked output while keeping overall Cohere order for everything else.
-        Returns the same object if no change was needed (cheap check).
+        promote the top-``pin_to`` filter_docs into the final top-``pin_to``
+        while keeping overall Cohere order for everything else. Returns
+        the same object if no change was needed (cheap check).
         """
         if not ranked or not filter_docs:
             return ranked
@@ -3151,6 +3151,13 @@ class AgenticRAG:
         limit = int(k * self.retrieval_factor)
 
         # Fast path: cheap keyword search; if top-score confident → rerank + return.
+        # BUT skip fast-accept when the query has a filter-intent word
+        # ("von", "de", "from", etc.) — these queries want brand/category
+        # filtering that the fast path can't do, and fast-accept would
+        # bypass the filter-search + pin logic entirely.
+        has_filter_word = any(
+            w.lower().strip("?,!.") in _FILTER_INTENT_WORDS for w in query.split()
+        )
         fast_docs = await self._afast_keyword_retrieve(query, limit)
         top_score = (
             float(fast_docs[0].metadata.get("_rankingScore", 0.0)) if fast_docs else 0.0
@@ -3158,10 +3165,14 @@ class AgenticRAG:
         score_th = self._fast_accept_score
         conf_th = self._fast_accept_confidence
         fast_accept = (
-            score_th is not None and top_score >= score_th and len(fast_docs) >= k
+            not has_filter_word
+            and score_th is not None
+            and top_score >= score_th
+            and len(fast_docs) >= k
         )
         if (
             not fast_accept
+            and not has_filter_word
             and conf_th is not None
             and fast_docs
             and len(fast_docs) >= k
