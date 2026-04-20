@@ -707,8 +707,18 @@ def main() -> None:
         action="store_true",
         help="Force interactive wizard even if env vars are set.",
     )
+    parser.add_argument(
+        "--verbose",
+        "-v",
+        action="store_true",
+        help="Stream the agent's reasoning trace: preprocess/filter-intent/"
+        "retrieve/rerank/generate, with timings and intermediate query "
+        "rewrites. Equivalent to setting RAG_VERBOSE=1.",
+    )
 
     args = parser.parse_args()
+    if args.verbose:
+        os.environ["RAG_VERBOSE"] = "1"
 
     # ── Wizard or env defaults ────────────────────────────────────────────────
     # Default: skip wizard when env provides enough to build an agent.
