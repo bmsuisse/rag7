@@ -1787,6 +1787,7 @@ class AgenticRAG:
                 "query": query,
                 "documents": docs,
                 "iterations": state.iterations + 1,
+                "pre_reranked": True,
             }
         )
         self._trace(
@@ -2050,6 +2051,11 @@ class AgenticRAG:
     async def _arerank(self, state: RAGState) -> RAGState:
         t0 = time.perf_counter()
         if not state.documents:
+            return state
+        if state.pre_reranked:
+            # Graph path already ran the full retriever pipeline (which
+            # includes rerank + filter-pin); don't second-guess it.
+            self._trace(state, "rerank", t0, skipped="pre_reranked")
             return state
         # Selective skip: confident query + no filter intent + no expert → hybrid order good enough
         if (
