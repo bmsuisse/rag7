@@ -76,6 +76,10 @@ class IndexConfig:
     sortable_attributes: list[str] = field(default_factory=list)
     ranking_rules: list[str] = field(default_factory=list)
     embedders: list[str] = field(default_factory=list)
+    # Mapping of embedder name → vector dimensions declared on the index.
+    # Empty when the backend cannot introspect dims (e.g. search-scoped key
+    # can't read settings, or embedder source doesn't pin dims).
+    embedder_dims: dict[str, int] = field(default_factory=dict)
 
 
 def _distance_rows_to_hits(
@@ -284,12 +288,26 @@ class MeilisearchBackend(SearchBackend):
     def get_index_config(self) -> IndexConfig:
         try:
             settings = self._client.index(self.index).get_settings()
+            emb_cfg = settings.get("embedders", {}) or {}
+            dims: dict[str, int] = {}
+            for name, cfg in emb_cfg.items():
+                # The SDK may return either a plain dict (older versions /
+                # REST shape) or a typed embedder dataclass — read dim from
+                # either.
+                d = (
+                    cfg.get("dimensions")
+                    if isinstance(cfg, dict)
+                    else getattr(cfg, "dimensions", None)
+                )
+                if isinstance(d, int) and d > 0:
+                    dims[name] = d
             return IndexConfig(
                 filterable_attributes=settings.get("filterableAttributes", []),
                 searchable_attributes=settings.get("searchableAttributes", []),
                 sortable_attributes=settings.get("sortableAttributes", []),
                 ranking_rules=settings.get("rankingRules", []),
-                embedders=list(settings.get("embedders", {}).keys()),
+                embedders=list(emb_cfg.keys()),
+                embedder_dims=dims,
             )
         except Exception:
             return IndexConfig()

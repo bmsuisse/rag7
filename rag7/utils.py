@@ -260,11 +260,20 @@ def _embed_cache_put(model: str, text: str, vec: list[float]) -> None:
         _embed_cache_flush(model)
 
 
-def _make_azure_embed_fn() -> Callable[[str], list[float]] | None:
+def _make_azure_embed_fn(
+    dimensions: int | None = None,
+) -> Callable[[str], list[float]] | None:
     endpoint = (os.getenv("AZURE_OPENAI_ENDPOINT") or "").rstrip("/")
     api_key = os.getenv("AZURE_OPENAI_API_KEY") or ""
     deploy = os.getenv("AZURE_OPENAI_EMBEDDING_DEPLOYMENT", "text-embedding-3-small")
     api_ver = os.getenv("AZURE_OPENAI_API_VERSION", "2024-12-01-preview")
+    # Env override so CLI/test users can pin a server-side dim without code edits.
+    env_dim = os.getenv("AZURE_OPENAI_EMBEDDING_DIM") or os.getenv("RAG7_EMBED_DIM")
+    if dimensions is None and env_dim:
+        try:
+            dimensions = int(env_dim)
+        except ValueError:
+            dimensions = None
 
     if not endpoint or not api_key:
         return None
@@ -275,23 +284,55 @@ def _make_azure_embed_fn() -> Callable[[str], list[float]] | None:
 
     from . import _cache as _c
 
+    # Namespace the cache by dim so 1536-d cached vectors don't shadow a
+    # 512-d configuration on the same deployment.
+    cache_ns = f"{deploy}@{dimensions}" if dimensions else deploy
+    body_extra = {"dimensions": dimensions} if dimensions else {}
+
     def _embed(text: str) -> list[float]:
-        hit = _embed_cache_get(deploy, text)
+        hit = _embed_cache_get(cache_ns, text)
         if hit is not None:
             return hit
-        cached = _c.load("embed-v1", deploy, text)
+        cached = _c.load("embed-v1", cache_ns, text)
         if cached is not None:
             vec = list(cached)
-            _embed_cache_put(deploy, text, vec)
+            _embed_cache_put(cache_ns, text, vec)
             return vec
-        resp = session.post(url, json={"input": [text]}, timeout=15)
+        resp = session.post(url, json={"input": [text], **body_extra}, timeout=15)
         resp.raise_for_status()
         vec = resp.json()["data"][0]["embedding"]
-        _c.save("embed-v1", deploy, text, value=vec)
-        _embed_cache_put(deploy, text, vec)
+        _c.save("embed-v1", cache_ns, text, value=vec)
+        _embed_cache_put(cache_ns, text, vec)
         return vec
 
+    # Mark the function so _align_embed_fn_with_backend can rebuild it with
+    # the index's native dim (server-side Matryoshka) instead of slicing.
+    _embed._rag7_azure_rebuild = lambda dim: _make_azure_embed_fn(dimensions=dim)  # type: ignore[attr-defined]
     return _embed
+
+
+def _adapt_embed_fn_to_dim(
+    embed_fn: Callable[[str], list[float]],
+    target_dim: int,
+) -> Callable[[str], list[float]]:
+    """Wrap ``embed_fn`` so outputs are sliced + L2-renormalized to ``target_dim``.
+
+    Matryoshka-trained models (text-embedding-3-*, BGE-M3, Nomic, Jina-v3) keep
+    meaning in the leading dims, so slice-then-renormalize is a valid projection.
+    For non-Matryoshka models the result is degraded but still better than
+    dim-mismatched zero-hit search.
+    """
+    import math
+
+    def _wrapped(text: str) -> list[float]:
+        vec = embed_fn(text)
+        if len(vec) == target_dim:
+            return vec
+        sliced = vec[:target_dim]
+        norm = math.sqrt(sum(x * x for x in sliced)) or 1.0
+        return [x / norm for x in sliced]
+
+    return _wrapped
 
 
 def _rrf_fuse(

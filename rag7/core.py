@@ -114,6 +114,172 @@ def _auto_cache_save(schema_sig: str, config: dict[str, Any]) -> None:
         pass
 
 
+def _detect_embedder_name(backend: SearchBackend, *, fallback: str) -> str:
+    """Pick an embedder name declared on the index, else ``fallback``.
+
+    Meilisearch rejects vector search with an unknown embedder name and
+    silently strips the vector arm — a wrong default collapses hybrid
+    search to BM25. Prefer ``default`` when present; otherwise the first
+    declared name.
+    """
+    try:
+        names = backend.get_index_config().embedders
+    except Exception:
+        return fallback
+    if not names:
+        return fallback
+    if "default" in names:
+        return "default"
+    return names[0]
+
+
+def _validate_embedder_name(backend: SearchBackend, name: str) -> None:
+    """Warn if ``name`` isn't declared on the backend's index.
+
+    Meilisearch silently drops the vector arm when the embedder name is
+    unknown — the query degrades to BM25-only without any error. Surface
+    that at init so users don't blame the retriever for a config typo.
+    """
+    try:
+        names = backend.get_index_config().embedders
+    except Exception:
+        return
+    if names and name not in names:
+        warnings.warn(
+            f"Configured embedder_name={name!r} is not declared on the index "
+            f"(available: {names}). Vector search will silently fall back to "
+            f"BM25-only. Set RAG_EMBEDDER_NAME or pass embedder_name= to one "
+            f"of the available names.",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+
+
+def _align_embed_fn_with_backend(
+    embed_fn: "Callable[[str], list[float]] | None",
+    backend: SearchBackend,
+) -> "Callable[[str], list[float]] | None":
+    """Reconcile ``embed_fn`` output dim with the backend's index dim.
+
+    When the index pins a single vector dimension and the embed function
+    produces a different size, vector search silently returns zero hits (the
+    backend drops the request). Detect once at init and:
+
+    * If all possible index dims are equal to the probe result → no-op.
+    * If exactly one index dim is declared → wrap with slice-and-renormalize
+      so the rest of the pipeline sends the right shape.
+    * Otherwise (multiple dims, no dims, or probe fails) → leave the fn alone.
+
+    The wrapper is a best-effort projection — it works well for
+    Matryoshka-trained models (text-embedding-3-*, BGE-M3, Nomic, Jina v3)
+    and at worst is no worse than the zero-hit status quo.
+    """
+    if embed_fn is None:
+        return None
+    try:
+        cfg = backend.get_index_config()
+    except Exception:
+        return embed_fn
+    dims = set(cfg.embedder_dims.values())
+    if not dims:
+        return embed_fn
+    try:
+        probe = embed_fn("probe")
+    except Exception:
+        return embed_fn
+    probe_dim = len(probe)
+    if probe_dim in dims:
+        return embed_fn
+    if len(dims) != 1:
+        warnings.warn(
+            f"Embed fn returns {probe_dim}-d vectors but index declares "
+            f"multiple dims {sorted(dims)}; vector search may miss. "
+            "Provide an embed_fn with a matching dimension.",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+        return embed_fn
+    target = next(iter(dims))
+    if probe_dim < target:
+        warnings.warn(
+            f"Embed fn returns {probe_dim}-d vectors but index expects "
+            f"{target}-d — can't up-project. Use a larger embedder.",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+        return embed_fn
+    # If the embedder is a rebuildable Azure client, ask OpenAI for native
+    # {target}-d vectors server-side (text-embedding-3 Matryoshka). Cheaper
+    # than slice+renorm and reuses the cache by dim namespace.
+    rebuild = getattr(embed_fn, "_rag7_azure_rebuild", None)
+    if callable(rebuild):
+        rebuilt = cast(Callable[[str], list[float]] | None, rebuild(target))
+        if rebuilt is not None:
+            return rebuilt
+    from .utils import _adapt_embed_fn_to_dim
+
+    warnings.warn(
+        f"Embed fn returns {probe_dim}-d but index expects {target}-d; "
+        "auto-adapting via slice+L2 renorm (Matryoshka-style).",
+        RuntimeWarning,
+        stacklevel=3,
+    )
+    return _adapt_embed_fn_to_dim(embed_fn, target)
+
+
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _clean_string(s: str) -> str:
+    """Strip HTML tags and collapse whitespace — reranker sees clean prose."""
+    return re.sub(r"\s+", " ", _HTML_TAG_RE.sub(" ", s)).strip()
+
+
+def _render_value(v: Any, indent: int = 0) -> str:
+    """Markdown renderer: bold labels, flat bullets, HTML stripped.
+
+    Markdown beat YAML and JSON on reranker accuracy in our eval
+    (+1 hit over YAML, +2 over JSON). Returns empty when the value
+    carries no information.
+    """
+    if isinstance(v, str):
+        return _clean_string(v)
+    if isinstance(v, bool) or isinstance(v, (int, float)):
+        return str(v)
+    if isinstance(v, dict):
+        lines: list[str] = []
+        for k, val in v.items():
+            rendered = _render_value(val, indent + 1)
+            if not rendered:
+                continue
+            if "\n" in rendered:
+                lines.append(f"- **{k}**:\n{rendered}")
+            else:
+                lines.append(f"- **{k}**: {rendered}")
+        return "\n".join(lines)
+    if isinstance(v, (list, tuple)):
+        lines = []
+        for item in v:
+            if (
+                isinstance(item, (list, tuple))
+                and len(item) == 2
+                and isinstance(item[0], str)
+            ):
+                rendered = _render_value(item[1], indent + 1)
+                if not rendered:
+                    continue
+                if "\n" in rendered:
+                    lines.append(f"- **{item[0]}**:\n{rendered}")
+                else:
+                    lines.append(f"- **{item[0]}**: {rendered}")
+            else:
+                rendered = _render_value(item, indent + 1)
+                if rendered:
+                    lines.append(f"- {rendered}")
+        return "\n".join(lines)
+    return _clean_string(str(v))
+
+
 def _detect_category_fields(backend: SearchBackend) -> list[str]:
     """Heuristic: find metadata fields likely to encode a category/group.
 
@@ -602,9 +768,12 @@ class AgenticRAG:
         self.n_swarm_queries = n_swarm_queries or int(
             os.getenv("RAG_N_SWARM_QUERIES", "4")
         )
-        self.embedder_name = embedder_name or os.getenv(
-            "RAG_EMBEDDER_NAME", "azure_openai"
-        )
+        explicit_embedder_name = embedder_name or os.getenv("RAG_EMBEDDER_NAME")
+        if explicit_embedder_name:
+            self.embedder_name = explicit_embedder_name
+            _validate_embedder_name(self.backend, explicit_embedder_name)
+        else:
+            self.embedder_name = _detect_embedder_name(self.backend, fallback="default")
         self.semantic_ratio = (
             semantic_ratio
             if semantic_ratio is not None
@@ -622,7 +791,7 @@ class AgenticRAG:
         )
         self.fusion: Literal["rrf", "dbsf"] = fusion or os.getenv("RAG_FUSION", "rrf")  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
         self.instructions = instructions
-        self.embed_fn = embed_fn
+        self.embed_fn = _align_embed_fn_with_backend(embed_fn, self.backend)
         self.hyde_style_hint = hyde_style_hint
         self.group_field = group_field
         self.name_field = name_field
@@ -1013,30 +1182,31 @@ class AgenticRAG:
         return SystemMessage(prompt)
 
     def _hit_to_text(self, h: dict) -> str:
-        """Render a hit as text for the reranker + generation LLM.
+        """Render a hit as clean YAML-ish text for the reranker + LLM.
 
-        If the backend's ``content`` field already concatenates every
-        useful field (most ingestion pipelines do this) we trust it.
-        Otherwise we dynamically flatten every string/number/list/dict
-        field so structured attributes (``akeneo_values``, product
-        specs, stock info) reach the generation LLM — not just the
-        pre-baked summary.
+        Every non-trivial field is emitted (minus ids/URLs/language) so
+        structured attributes (akeneo_values, specs, stock info) reach
+        the ranker. Lists render as indented bullet lines, nested dicts
+        as indented key/value, and HTML tags are stripped — clean prose
+        scores better than raw Python reprs on reranker models (see
+        improvingagents.com/blog/best-nested-data-format, YAML>JSON>XML).
         """
         content = h.get("content")
         extras: list[str] = []
         for k, v in h.items():
-            if k in _SKIP_FIELDS or k == "content" or not v:
+            if k in _SKIP_FIELDS or k == "content" or v is None or v == "":
+                continue
+            rendered = _render_value(v, indent=0)
+            if not rendered:
                 continue
             if isinstance(v, str):
-                text = v.strip()
-                if text and (not content or text not in content):
-                    extras.append(f"{k}: {text}")
-            elif isinstance(v, (int, float, bool)):
-                extras.append(f"{k}: {v}")
-            elif isinstance(v, (list, dict)):
-                # Structured attributes (e.g. akeneo_values) — stringify so
-                # the LLM can read spec tuples like ('Flaschenöffner', 'ja').
-                extras.append(f"{k}: {v}")
+                if content and rendered in content:
+                    continue
+                extras.append(f"**{k}**: {rendered}")
+            elif "\n" in rendered:
+                extras.append(f"**{k}**:\n{rendered}")
+            else:
+                extras.append(f"**{k}**: {rendered}")
         if content and not extras:
             return str(content)
         if content:
@@ -1255,7 +1425,16 @@ class AgenticRAG:
         adaptive_semantic_ratio: float | None = None,
         adaptive_fusion: str | None = None,
         hyde_text: str | None = None,
-    ) -> list[Document]:
+    ) -> tuple[list[Document], bool]:
+        """Return ``(docs, bm25_empty)``.
+
+        ``bm25_empty`` is True when every BM25-only arm (i.e. each request
+        without a vector) returned zero hits. That's the typo/OOV rescue
+        signal: the query terms literally aren't in the corpus, so the
+        caller should fall back to an LLM rewrite via ``_aswarm_retrieve``.
+        Pure vector hits can still fill ``docs`` with semantically-adjacent
+        noise, which we don't want to block the rescue.
+        """
         limit = int(self.top_k * (factor or self.retrieval_factor))
         hyde_source = question or query
 
@@ -1307,6 +1486,8 @@ class AgenticRAG:
                 seen.add(v)
 
         results = await loop.run_in_executor(None, self.backend.batch_search, requests)
+        bm25_arms = [r for req, r in zip(requests, results) if not req.vector]
+        bm25_empty = bool(bm25_arms) and all(len(r) == 0 for r in bm25_arms)
         fuse_method = adaptive_fusion or self.fusion
         if results:
             if fuse_method == "dbsf":
@@ -1320,10 +1501,11 @@ class AgenticRAG:
                 self._make_search_request(query, limit, filter_expr=lang_filter),
             )
 
-        return [
+        docs = [
             Document(page_content=self._hit_to_text(h), metadata=h)
             for h in fused[:limit]
         ]
+        return docs, bm25_empty
 
     async def _aroute_collections(self, state: RAGState) -> RAGState:
         if self.collections and not state.selected_collections:
@@ -1510,7 +1692,7 @@ class AgenticRAG:
             adaptive_fusion=state.adaptive_fusion,
         )
         if state.iterations == 0:
-            broad_docs, (intent, filter_docs) = await asyncio.gather(
+            (broad_docs, _bm25_empty), (intent, filter_docs) = await asyncio.gather(
                 broad_coro,
                 self._afilter_search_with_intent(
                     state.question, state.query, precomputed=intent
@@ -1523,7 +1705,7 @@ class AgenticRAG:
             else:
                 docs = broad_docs
         else:
-            docs = await broad_coro
+            docs, _bm25_empty = await broad_coro
         new = state.model_copy(
             update={
                 "documents": docs,
@@ -2772,7 +2954,7 @@ class AgenticRAG:
             else ref_text
         )
 
-        broad_docs = await self._asearch(
+        broad_docs, _ = await self._asearch(
             query,
             question=ref_text,
             factor=self.retrieval_factor,
@@ -2857,7 +3039,7 @@ class AgenticRAG:
         fb_th = self._bm25_fallback_threshold
         if fb_th is not None and top_score < fb_th and effective_semantic_ratio is None:
             effective_semantic_ratio = self._bm25_fallback_semantic_ratio
-        broad_docs = await self._asearch(
+        broad_docs, bm25_empty = await self._asearch(
             state.query,
             question=state.question,
             extra_bm25=state.query_variants,
@@ -2895,7 +3077,14 @@ class AgenticRAG:
         if fast_docs:
             docs = self._merge_doc_lists(docs, fast_docs)
         state = state.model_copy(update={"documents": docs, "iterations": 1})
-        if not state.documents:
+        # Typo/OOV rescue: every BM25 arm returned zero, so the query's
+        # literal tokens aren't in the corpus vocabulary. Vector hits may
+        # have filled `docs` with semantically-adjacent noise (especially
+        # when the query embedder differs from the ingest embedder), which
+        # would otherwise short-circuit the swarm path. Force the LLM
+        # rewrite so variants like "Flaschenöffner" for "bieröffner" get a
+        # chance to hit BM25.
+        if not state.documents or (bm25_empty and not filter_docs):
             state = await self._aswarm_retrieve(state)
         state = await self._arerank(state)
         return state.query, state.documents[:k]

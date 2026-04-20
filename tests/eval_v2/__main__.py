@@ -50,7 +50,11 @@ ARTICLE_HITS: list[HIT_CASE] = [
 ]
 
 SUPPLIER_CATALOGS_DE_HITS: list[HIT_CASE] = [
-    ("ACO Drain Rinne Monoblock", ["-1284896587609186235", "7647252346056341609"], "id"),
+    (
+        "ACO Drain Rinne Monoblock",
+        ["-1284896587609186235", "7647252346056341609"],
+        "id",
+    ),
     ("Entwässerung Ablauf", ["6470805727571075019", "-1284896587609186235"], "id"),
 ]
 
@@ -62,16 +66,24 @@ SUITES: list[tuple[str, str, list[HIT_CASE]]] = [
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-async def _build_rag(index: str, embed_fn: Any) -> Any:
-    from rag7 import AgenticRAG
+async def _build_rag(index: str) -> Any:
+    from rag7 import AgenticRAG, RAGConfig
     from rag7.backend import MeilisearchBackend
+    from rag7.utils import _make_azure_embed_fn
 
-    from rag7 import RAGConfig
+    # Match the client embedder dimension to whatever the index declares, so
+    # text-embedding-3-small returns native 512-d (or whatever is needed)
+    # instead of getting sliced on the client. Server-side truncation is
+    # cheaper in bandwidth and avoids the lossy L2-renorm path.
+    backend = MeilisearchBackend(index=index)
+    cfg = backend.get_index_config()
+    dims = set(cfg.embedder_dims.values())
+    target_dim = next(iter(dims)) if len(dims) == 1 else None
 
     return AgenticRAG(
         index=index,
-        backend=MeilisearchBackend(index=index),
-        embed_fn=embed_fn,
+        backend=backend,
+        embed_fn=_make_azure_embed_fn(dimensions=target_dim),
         config=RAGConfig.auto(),
         auto_strategy=True,
     )
@@ -82,9 +94,6 @@ async def main() -> None:
         print("No eval suites configured. Edit SUITES in tests/eval_v2/__main__.py.")
         return
 
-    from rag7.utils import _make_azure_embed_fn
-
-    embed_fn = _make_azure_embed_fn()
     sem = asyncio.Semaphore(20)
 
     t0 = time.perf_counter()
@@ -95,7 +104,7 @@ async def main() -> None:
     stable_sum = 0.0
 
     for index, label, base in SUITES:
-        rag = await _build_rag(index, embed_fn)
+        rag = await _build_rag(index)
 
         adversarial = build_adversarial_cases(base)
         print(f"\n══ {label}: adversarial ({len(adversarial)} variants) ══")
@@ -121,17 +130,19 @@ async def main() -> None:
             grand_total += t
 
     elapsed = time.perf_counter() - t0
-    avg_consistency = consistency_sum / consistency_groups if consistency_groups else 0.0
+    avg_consistency = (
+        consistency_sum / consistency_groups if consistency_groups else 0.0
+    )
     avg_stable = stable_sum / consistency_groups if consistency_groups else 0.0
 
-    avg_query_latency_ms = (
-        elapsed / grand_total * 1000 if grand_total else 0.0
-    )
+    avg_query_latency_ms = elapsed / grand_total * 1000 if grand_total else 0.0
     print("\n════════════════════════════════════════════════════════════")
     print(f"eval_v2 summary: {elapsed:.1f}s total")
     if grand_total:
-        print(f"  adversarial+synthetic hit@5: {grand_hits}/{grand_total} = "
-              f"{grand_hits / grand_total:.4f}")
+        print(
+            f"  adversarial+synthetic hit@5: {grand_hits}/{grand_total} = "
+            f"{grand_hits / grand_total:.4f}"
+        )
     print(f"  paraphrase consistency:      {avg_consistency:.4f}")
     print(f"  paraphrase stable_top1:      {avg_stable:.4f}")
     print(f"  avg query latency:           {avg_query_latency_ms:.0f}ms")
