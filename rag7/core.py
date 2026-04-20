@@ -3095,14 +3095,22 @@ class AgenticRAG:
         init = RAGState(question=query, query=query)
         preprocess_task = asyncio.create_task(self._apreprocess(init))
         hyde_task = asyncio.create_task(self._acompute_hyde(query))
+        # Intent DETECTION fires in parallel with preprocess — the LLM call
+        # is ~1-2s and independent of query rewrite. Filter SEARCH still
+        # waits for preprocess so it can use the LLM's query_variants.
+        intent_detect_task = asyncio.create_task(self._adetect_filter_intent(query))
         state = await preprocess_task
+        try:
+            intent = await intent_detect_task
+        except Exception:
+            intent = None
 
-        # Fire filter+intent search AFTER preprocess so query_variants can
-        # propagate — the raw query alone often misses (e.g. "bieröffner"
-        # without its LLM-generated "flaschenöffner" variant).
         filter_intent_task = asyncio.create_task(
             self._afilter_search_with_intent(
-                query, state.query, variants=state.query_variants
+                query,
+                state.query,
+                precomputed=intent,
+                variants=state.query_variants,
             )
         )
 
