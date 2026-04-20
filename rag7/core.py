@@ -253,8 +253,15 @@ def _clean_string(s: str) -> str:
     return re.sub(r"\s+", " ", _HTML_TAG_RE.sub(" ", s)).strip()
 
 
+_MAX_LIST_ITEMS = 8
+"""Cap bulky list values (stock_data per-warehouse, etc.) at this many
+items when rendering for the reranker. Spec lists like akeneo_values
+rarely exceed this count; warehouse/location arrays can be 20+ and
+would otherwise push downstream fields past the rerank_chars cutoff."""
+
+
 def _render_value(v: Any, indent: int = 0) -> str:
-    """Markdown renderer: bold labels, flat bullets, HTML stripped.
+    """Markdown renderer: bold labels, flat bullets, HTML stripped, lists capped.
 
     Markdown beat YAML and JSON on reranker accuracy in our eval
     (+1 hit over YAML, +2 over JSON). Returns empty when the value
@@ -277,7 +284,9 @@ def _render_value(v: Any, indent: int = 0) -> str:
         return "\n".join(lines)
     if isinstance(v, (list, tuple)):
         lines = []
-        for item in v:
+        items = list(v)
+        truncated = len(items) > _MAX_LIST_ITEMS
+        for item in items[:_MAX_LIST_ITEMS]:
             if (
                 isinstance(item, (list, tuple))
                 and len(item) == 2
@@ -294,6 +303,8 @@ def _render_value(v: Any, indent: int = 0) -> str:
                 rendered = _render_value(item, indent + 1)
                 if rendered:
                     lines.append(f"- {rendered}")
+        if truncated:
+            lines.append(f"- (…{len(items) - _MAX_LIST_ITEMS} more)")
         return "\n".join(lines)
     return _clean_string(str(v))
 
@@ -1211,25 +1222,26 @@ class AgenticRAG:
         improvingagents.com/blog/best-nested-data-format, YAML>JSON>XML).
         """
         content = h.get("content")
-        # Pre-render every field, then emit smallest → largest so the
-        # reranker's rerank_chars window always catches short dense fields
-        # (article_name, supplier, category, search terms, specs) before
-        # bulky ones (stock_data per-warehouse lists). Without this the
-        # payload gets truncated inside the wrong field — e.g. ProOne
-        # Multi-Tool had "Flaschenöffner" buried past the 2048-char cap.
+        # Render every field, then emit shortest → longest so the
+        # reranker's rerank_chars window catches short dense fields
+        # (article_name, supplier, category, search terms, spec pairs)
+        # before any remaining bulky ones. List values are already capped
+        # at _MAX_LIST_ITEMS, but ordering still matters: without it, e.g.
+        # akeneo_values ends up after stock_data in dict insertion order
+        # and search-relevant spec content gets truncated.
         rendered_items: list[tuple[int, str]] = []
         for k, v in h.items():
             if k in _SKIP_FIELDS or k == "content" or v is None or v == "":
                 continue
-            r = _render_value(v, indent=0)
-            if not r:
+            rendered = _render_value(v, indent=0)
+            if not rendered:
                 continue
-            if isinstance(v, str) and content and r in content:
+            if isinstance(v, str) and content and rendered in content:
                 continue
-            if isinstance(v, str) or "\n" not in r:
-                line = f"**{k}**: {r}"
+            if isinstance(v, str) or "\n" not in rendered:
+                line = f"**{k}**: {rendered}"
             else:
-                line = f"**{k}**:\n{r}"
+                line = f"**{k}**:\n{rendered}"
             rendered_items.append((len(line), line))
         extras = [line for _, line in sorted(rendered_items, key=lambda x: x[0])]
         if content and not extras:
