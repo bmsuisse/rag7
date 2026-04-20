@@ -77,6 +77,14 @@ ONETRADE_DE_HITS: list[HIT_CASE] = [
     # need the LLM variants + brand filter to resolve.
     ("Schaumpistole von ProOne", ["1050511", "7504843"], "article_id"),
     ("Schuhputzer proone", ["9225388"], "article_id"),
+    # Sanitary / bathroom — cross-brand recall (Kaldewei / Laufen / Grohe /
+    # Hansgrohe / Geberit / Villeroy Boch).
+    ("Badewanne Stahl emailliert", ["7523696"], "article_id"),
+    ("freistehende Acryl Badewanne 170cm", ["7826586"], "article_id"),
+    ("Duschwand Walk-In Glas 150", ["7885103"], "article_id"),
+    ("Auflege-Waschtisch Laufen Kartell", ["7536879", "7536876"], "article_id"),
+    ("Hansgrohe Brause sBox", ["7869167", "8188090"], "article_id"),
+    ("Klosettsitz Villeroy Boch", ["6144722"], "article_id"),
 ]
 
 ARTICLE_HITS: list[HIT_CASE] = [
