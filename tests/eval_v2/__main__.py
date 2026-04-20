@@ -85,6 +85,20 @@ ONETRADE_DE_HITS: list[HIT_CASE] = [
     ("Auflege-Waschtisch Laufen Kartell", ["7536879", "7536876"], "article_id"),
     ("Hansgrohe Brause sBox", ["7869167", "8188090"], "article_id"),
     ("Klosettsitz Villeroy Boch", ["6144722"], "article_id"),
+    # General-purpose product queries across categories.
+    ("Arbeitshandschuh Leder", ["6243635"], "article_id"),
+    ("Makita Bohrhammer SDS Plus 18V", ["1065144"], "article_id"),
+    ("Bosch Kreissägeblatt 190mm", ["1058305", "1058595"], "article_id"),
+    ("ProOne Silikon Sanitär transparent 310ml", ["1003220"], "article_id"),
+    ("Bleistift Zimmermann Caran d'Ache", ["7918735", "7919406"], "article_id"),
+    ("Maurerkelle 180mm", ["7918976"], "article_id"),
+    ("Wasserwaage 60cm BMI", ["7995907"], "article_id"),
+    ("Zollstock 2 Meter", ["9174216", "7919077"], "article_id"),
+    # Natural-language / user-phrasing variants.
+    ("welches Radio gibt es von ProOne?", ["9183348"], "article_id"),
+    ("ich brauche einen 18V Bohrhammer von Makita", ["1065144"], "article_id"),
+    ("einen Hammer mit kurzem Stiel", ["1055521", "1048808"], "article_id"),
+    ("gibt es Schuhreiniger bei euch?", ["9225388"], "article_id"),
 ]
 
 ARTICLE_HITS: list[HIT_CASE] = [
