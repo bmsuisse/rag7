@@ -17,22 +17,23 @@ from typing import Callable
 
 HIT_CASE = tuple[str, list[str], str]
 
-_UMLAUT = str.maketrans({"ä": "a", "ö": "o", "ü": "u", "ß": "ss",
-                         "Ä": "A", "Ö": "O", "Ü": "U"})
+_UMLAUT = str.maketrans(
+    {"ä": "a", "ö": "o", "ü": "u", "ß": "ss", "Ä": "A", "Ö": "O", "Ü": "U"}
+)
 
 
 def _swap_adjacent(word: str, rng: random.Random) -> str:
     if len(word) < 4:
         return word
     i = rng.randrange(1, len(word) - 2)
-    return word[:i] + word[i + 1] + word[i] + word[i + 2:]
+    return word[:i] + word[i + 1] + word[i] + word[i + 2 :]
 
 
 def _drop_char(word: str, rng: random.Random) -> str:
     if len(word) < 4:
         return word
     i = rng.randrange(1, len(word) - 1)
-    return word[:i] + word[i + 1:]
+    return word[:i] + word[i + 1 :]
 
 
 def typo_variants(query: str, n: int = 3, seed: int = 0) -> list[str]:
@@ -54,7 +55,7 @@ def typo_variants(query: str, n: int = 3, seed: int = 0) -> list[str]:
             break
         new_word = transform(longest, rng)
         if new_word != longest:
-            variant = words[:longest_idx] + [new_word] + words[longest_idx + 1:]
+            variant = words[:longest_idx] + [new_word] + words[longest_idx + 1 :]
             joined = " ".join(variant)
             if joined not in out and joined != query:
                 out.append(joined)
@@ -116,7 +117,9 @@ def expand_cases(
     for query, ids, field in base:
         for transform in transforms:
             result = transform(query)
-            variants = result if isinstance(result, list) else [result] if result else []
+            variants = (
+                result if isinstance(result, list) else [result] if result else []
+            )
             for variant in variants:
                 key = (variant, field)
                 if variant and variant != query and key not in seen:

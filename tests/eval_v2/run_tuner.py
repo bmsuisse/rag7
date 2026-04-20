@@ -35,7 +35,11 @@ def build_testset() -> list[tuple[str, list[HIT_CASE], list[HIT_CASE]]]:
 
 
 async def _retrieve_ids(
-    rag: Any, query: str, id_field: str, k: int = 5, latencies: list[float] | None = None
+    rag: Any,
+    query: str,
+    id_field: str,
+    k: int = 5,
+    latencies: list[float] | None = None,
 ) -> list[str]:
     import time as _time
 
@@ -189,7 +193,9 @@ def main() -> None:
 
     embed_fn = _make_azure_embed_fn()
 
-    baseline = RAGConfig(strong_model=args.strong_model) if args.strong_model else RAGConfig()
+    baseline = (
+        RAGConfig(strong_model=args.strong_model) if args.strong_model else RAGConfig()
+    )
     baseline_metrics = asyncio.run(evaluate_config(baseline, testset, embed_fn))
     print(
         f"Baseline: hit@5={baseline_metrics['hit@5']:.4f} "
@@ -216,7 +222,9 @@ def main() -> None:
         cfg = RAGConfig(
             retrieval_factor=trial.suggest_int("retrieval_factor", 2, 8),
             rerank_top_n=trial.suggest_int("rerank_top_n", 3, 10),
-            rerank_cap_multiplier=trial.suggest_float("rerank_cap_multiplier", 1.5, 4.0),
+            rerank_cap_multiplier=trial.suggest_float(
+                "rerank_cap_multiplier", 1.5, 4.0
+            ),
             semantic_ratio=trial.suggest_float("semantic_ratio", 0.3, 0.9),
             fusion=trial.suggest_categorical("fusion", ["rrf", "dbsf"]),
             short_query_threshold=trial.suggest_int("short_query_threshold", 3, 8),

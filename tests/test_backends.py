@@ -60,8 +60,7 @@ class TestChromaDBBackend:
             ids=[d["id"] for d in SAMPLE_DOCS],
             documents=[d["content"] for d in SAMPLE_DOCS],
             metadatas=[
-                {"category": d["category"], "priority": d["id"]}
-                for d in SAMPLE_DOCS
+                {"category": d["category"], "priority": d["id"]} for d in SAMPLE_DOCS
             ],
         )
         yield b
@@ -103,9 +102,7 @@ class TestChromaDBBackend:
         assert all(h.get("category") == "tech" for h in hits)
 
     def test_search_with_inequality_filter(self, backend):
-        req = SearchRequest(
-            query="cat", limit=5, filter_expr='category != "animals"'
-        )
+        req = SearchRequest(query="cat", limit=5, filter_expr='category != "animals"')
         hits = backend.search(req)
         assert len(hits) > 0, "inequality filter produced empty result"
         assert all(h.get("category") != "animals" for h in hits)
@@ -137,9 +134,7 @@ class TestChromaDBBackend:
         req = SearchRequest(
             query="anything",
             limit=10,
-            filter_expr={
-                "$and": [{"category": "tech"}, {"priority": {"$ne": "1"}}]
-            },
+            filter_expr={"$and": [{"category": "tech"}, {"priority": {"$ne": "1"}}]},
         )
         hits = backend.search(req)
         assert len(hits) > 0
@@ -236,17 +231,13 @@ class TestLanceDBBackend:
 
     def test_search_with_inequality_filter(self, backend):
         """SQL-style != filter — must exclude matching docs."""
-        req = SearchRequest(
-            query="cat", limit=5, filter_expr="category != 'animals'"
-        )
+        req = SearchRequest(query="cat", limit=5, filter_expr="category != 'animals'")
         hits = backend.search(req)
         assert len(hits) > 0, "inequality filter produced empty result"
         assert all(h.get("category") != "animals" for h in hits)
 
     def test_sample_with_filter(self, backend):
-        docs = backend.sample_documents(
-            limit=10, filter_expr="category = 'animals'"
-        )
+        docs = backend.sample_documents(limit=10, filter_expr="category = 'animals'")
         assert len(docs) > 0, "filter on sample produced empty result"
         assert all(d["category"] == "animals" for d in docs)
 
@@ -342,9 +333,9 @@ class TestLanceDBBackend:
         # What matters: the filter PARSED and EXECUTED (no silent swallow).
         # Flip assertion by adding a third category if you want positive hits.
         assert isinstance(hits, list)
-        assert all(
-            h.get("category") not in {"tech", "animals"} for h in hits
-        ), "own-brand exclusion leaked a hit"
+        assert all(h.get("category") not in {"tech", "animals"} for h in hits), (
+            "own-brand exclusion leaked a hit"
+        )
 
 
 # ── DuckDB ───────────────────────────────────────────────────────────────────
@@ -548,9 +539,7 @@ class TestPgvectorBackend:
             )
         )
         assert "NOT ILIKE '%tech%'" in expr
-        hits = self.backend.search(
-            SearchRequest(query="x", limit=10, filter_expr=expr)
-        )
+        hits = self.backend.search(SearchRequest(query="x", limit=10, filter_expr=expr))
         assert all("tech" not in str(h.get("category", "")).lower() for h in hits)
 
     def test_text_search_fallback(self):
@@ -639,11 +628,7 @@ class TestQdrantBackend:
         """Qdrant native `must=[FieldCondition(match=MatchValue)]` dict."""
         from qdrant_client.models import FieldCondition, MatchValue
 
-        flt = {
-            "must": [
-                FieldCondition(key="category", match=MatchValue(value="tech"))
-            ]
-        }
+        flt = {"must": [FieldCondition(key="category", match=MatchValue(value="tech"))]}
         req = SearchRequest(query="programming", limit=5, filter_expr=flt)
         hits = backend.search(req)
         assert len(hits) > 0
@@ -672,7 +657,10 @@ class TestQdrantBackend:
                 FieldCondition(key="category", match=MatchValue(value="tech")),
             ],
             "must_not": [
-                FieldCondition(key="content", match=MatchValue(value="Python is a programming language")),
+                FieldCondition(
+                    key="content",
+                    match=MatchValue(value="Python is a programming language"),
+                ),
             ],
         }
         req = SearchRequest(query="anything", limit=10, filter_expr=flt)
@@ -682,7 +670,6 @@ class TestQdrantBackend:
             and h.get("content") != "Python is a programming language"
             for h in hits
         )
-
 
 
 # ── Qdrant (server-backed — for features local mode doesn't support) ────────

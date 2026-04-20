@@ -2895,8 +2895,22 @@ class AgenticRAG:
         if fast_docs:
             docs = self._merge_doc_lists(docs, fast_docs)
         state = state.model_copy(update={"documents": docs, "iterations": 1})
-        if not state.documents:
-            state = await self._aswarm_retrieve(state)
+        # Low-confidence fallback: trigger swarm (LLM-rewritten query
+        # variants) when BM25 couldn't find anything that actually matched.
+        # "bieröffner" for a corpus that spells it "Flaschenöffner" → top
+        # score is near 0, vector finds the right doc but BM25 noise may
+        # rank it below high-sales unrelated products. Swarm generates
+        # synonym/rewrite variants so the keyword path can catch up.
+        low_confidence = not state.documents or (
+            state.documents
+            and float(state.documents[0].metadata.get("_rankingScore", 0.0) or 0.0)
+            < 0.3
+        )
+        if low_confidence and not state.query_variants:
+            swarm = await self._aswarm_retrieve(state)
+            if swarm.documents:
+                merged = self._merge_doc_lists(swarm.documents, state.documents)
+                state = state.model_copy(update={"documents": merged})
         state = await self._arerank(state)
         return state.query, state.documents[:k]
 

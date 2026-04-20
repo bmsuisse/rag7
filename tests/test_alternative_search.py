@@ -104,6 +104,7 @@ def _make_agent(backend: Any) -> AgenticRAG:
 
 def _mock_preprocess_with_alternative(alternative_to: str):
     """Return a patched _apreprocess that sets alternative_to."""
+
     async def _fake_preprocess(self: Any, state: RAGState) -> RAGState:
         return state.model_copy(
             update={
@@ -111,13 +112,16 @@ def _mock_preprocess_with_alternative(alternative_to: str):
                 "alternative_to": alternative_to,
             }
         )
+
     return _fake_preprocess
 
 
 def _mock_preprocess_normal():
     """Return a patched _apreprocess that does NOT set alternative_to."""
+
     async def _fake_preprocess(self: Any, state: RAGState) -> RAGState:
         return state.model_copy(update={"query": state.question})
+
     return _fake_preprocess
 
 
@@ -170,23 +174,23 @@ class TestAlternativeRetrieve:
         backend = _AlternativeBackend()
         rag = _make_agent(backend)
 
-        asyncio.run(
-            rag._aalternative_retrieve("trockenbeton", "fixit 516", top_k=5)
-        )
+        asyncio.run(rag._aalternative_retrieve("trockenbeton", "fixit 516", top_k=5))
 
         search_reqs = [
-            r for r in backend.requests
-            if "fixit 516" not in r.query.lower()
+            r for r in backend.requests if "fixit 516" not in r.query.lower()
         ]
         assert search_reqs, "should have made a broad search request"
 
     def test_fallback_when_product_not_found(self) -> None:
         """If the referenced product can't be found, fall back gracefully."""
+
         class _EmptyBackend(InMemoryBackend):
             def batch_search(self, requests):
                 return [[] for _ in requests]
+
             def search(self, request):
                 return []
+
             def get_index_config(self):
                 return IndexConfig()
 
@@ -220,12 +224,11 @@ class TestAlternativeIntegrationDirect:
         rag = _make_agent(backend)
 
         with patch.object(
-            type(rag), "_apreprocess",
+            type(rag),
+            "_apreprocess",
             _mock_preprocess_with_alternative("fixit 516"),
         ):
-            _, docs = asyncio.run(
-                rag._aretrieve_documents("Alternative zu fixit 516")
-            )
+            _, docs = asyncio.run(rag._aretrieve_documents("Alternative zu fixit 516"))
 
         ids = [d.metadata.get("article_id") for d in docs]
         assert "4457227" not in ids, "fixit 516 must be excluded via alt path"
@@ -237,12 +240,11 @@ class TestAlternativeIntegrationDirect:
         rag = _make_agent(backend)
 
         with patch.object(
-            type(rag), "_apreprocess",
+            type(rag),
+            "_apreprocess",
             _mock_preprocess_normal(),
         ):
-            _, docs = asyncio.run(
-                rag._aretrieve_documents("trockenbeton 016")
-            )
+            _, docs = asyncio.run(rag._aretrieve_documents("trockenbeton 016"))
 
         assert len(docs) >= 1
 
@@ -256,10 +258,13 @@ class TestAlternativeIntegrationGraph:
         rag = _make_agent(backend)
 
         with patch.object(
-            type(rag), "_apreprocess",
+            type(rag),
+            "_apreprocess",
             _mock_preprocess_with_alternative("fixit 516"),
         ):
-            init = RAGState(question="Alternative zu fixit 516", query="Alternative zu fixit 516")
+            init = RAGState(
+                question="Alternative zu fixit 516", query="Alternative zu fixit 516"
+            )
             state = asyncio.run(rag._aparallel_start(init))
 
         ids = [d.metadata.get("article_id") for d in state.documents]
@@ -272,7 +277,8 @@ class TestAlternativeIntegrationGraph:
         rag = _make_agent(backend)
 
         with patch.object(
-            type(rag), "_apreprocess",
+            type(rag),
+            "_apreprocess",
             _mock_preprocess_normal(),
         ):
             init = RAGState(question="trockenbeton 016", query="trockenbeton 016")

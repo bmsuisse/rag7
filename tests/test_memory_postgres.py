@@ -40,7 +40,12 @@ def test_mem0_checkpointer_postgres():
 
 async def _run():
     from mem0 import AsyncMemory
-    from mem0.configs.base import EmbedderConfig, LlmConfig, MemoryConfig, VectorStoreConfig
+    from mem0.configs.base import (
+        EmbedderConfig,
+        LlmConfig,
+        MemoryConfig,
+        VectorStoreConfig,
+    )
     from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
     from rag7 import init_agent
     from rag7.backend import InMemoryBackend
@@ -54,7 +59,10 @@ async def _run():
             llm=LlmConfig(
                 provider="azure_openai",
                 config={
-                    "azure_kwargs": {**AZURE_KWARGS, "azure_deployment": AZURE_DEPLOYMENT},
+                    "azure_kwargs": {
+                        **AZURE_KWARGS,
+                        "azure_deployment": AZURE_DEPLOYMENT,
+                    },
                 },
             ),
             embedder=EmbedderConfig(
@@ -77,7 +85,9 @@ async def _run():
             mem0_memory=memory,
         )
 
-        config = {"configurable": {"thread_id": "test-thread-1", "user_id": "test-user"}}
+        config = {
+            "configurable": {"thread_id": "test-thread-1", "user_id": "test-user"}
+        }
 
         # Turn 1 — plant a preference
         state1 = await rag.ainvoke("I prefer very short answers.", config=config)
@@ -90,7 +100,9 @@ async def _run():
         print("Turn 2:", state2.answer[:100])
 
         # Turn 3 — new thread, same user — mem0 should recall preference
-        config2 = {"configurable": {"thread_id": "test-thread-2", "user_id": "test-user"}}
+        config2 = {
+            "configurable": {"thread_id": "test-thread-2", "user_id": "test-user"}
+        }
         state3 = await rag.ainvoke("Explain vector search.", config=config2)
         assert state3.answer
         print("Turn 3 (new thread):", state3.answer[:100])

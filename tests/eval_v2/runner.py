@@ -21,9 +21,7 @@ HIT_CASE = tuple[str, list[str], str]
 _DATA_DIR = Path(__file__).parent
 
 
-async def _retrieve_ids(
-    rag: Any, query: str, id_field: str, k: int = 5
-) -> list[str]:
+async def _retrieve_ids(rag: Any, query: str, id_field: str, k: int = 5) -> list[str]:
     _, docs = await rag._aretrieve_documents(query, top_k=k)
     return [str(d.metadata.get(id_field, "")) for d in docs]
 
@@ -46,8 +44,12 @@ async def run_hits(
 
     results = await asyncio.gather(*(_one(c) for c in cases))
     hits = sum(results)
-    print(f"[{label}] hit@5 = {hits}/{total} = {hits / total:.4f}" if total else
-          f"[{label}] no cases", flush=True)
+    print(
+        f"[{label}] hit@5 = {hits}/{total} = {hits / total:.4f}"
+        if total
+        else f"[{label}] no cases",
+        flush=True,
+    )
     return hits, total
 
 
@@ -61,6 +63,7 @@ async def run_consistency(
 
     Returns (avg_consistency, stable_top1_rate, group_count).
     """
+
     async def _top_ids(query: str, field: str) -> list[str]:
         async with sem:
             return await _retrieve_ids(rag, query, field)
@@ -88,8 +91,11 @@ async def run_consistency(
 
     avg = sum(consistencies) / len(consistencies) if consistencies else 0.0
     stable_rate = stable / total if total else 0.0
-    print(f"[{label}] consistency={avg:.4f}  stable_top1={stable_rate:.4f}  "
-          f"groups={total}", flush=True)
+    print(
+        f"[{label}] consistency={avg:.4f}  stable_top1={stable_rate:.4f}  "
+        f"groups={total}",
+        flush=True,
+    )
     return avg, stable_rate, total
 
 
@@ -114,7 +120,4 @@ def synthetic_cases(
 ) -> list[HIT_CASE]:
     """Load LLM-generated (query → doc_id) pairs."""
     entries = load_json_cases(path)
-    return [
-        (e["query"], [str(e["doc_id"])], e.get("id_field", "id"))
-        for e in entries
-    ]
+    return [(e["query"], [str(e["doc_id"])], e.get("id_field", "id")) for e in entries]

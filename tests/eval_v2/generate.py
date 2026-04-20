@@ -60,7 +60,9 @@ async def _paraphrase_one(llm: Any, query: str, n: int = 3) -> list[str]:
     try:
         resp = await llm.ainvoke([HumanMessage(prompt)])
         text = str(resp.content).strip()
-        text = text.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+        text = (
+            text.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+        )
         variants = json.loads(text)
         if isinstance(variants, list):
             cleaned = [
@@ -111,7 +113,9 @@ async def _synthetic_one(
     try:
         resp = await llm.ainvoke([HumanMessage(prompt)])
         text = str(resp.content).strip()
-        text = text.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+        text = (
+            text.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+        )
         queries = json.loads(text)
         if isinstance(queries, list):
             out = [
@@ -126,9 +130,7 @@ async def _synthetic_one(
     return []
 
 
-async def build_synthetic(
-    docs: list[tuple[str, str, str]], n_per_doc: int = 2
-) -> None:
+async def build_synthetic(docs: list[tuple[str, str, str]], n_per_doc: int = 2) -> None:
     """docs: list of (doc_text, doc_id, id_field) triples sampled from an index."""
     llm = _get_llm()
     sem = asyncio.Semaphore(10)
@@ -173,9 +175,13 @@ def sample_docs_from_meili(
         if not doc_id:
             continue
         fields = text_fields or [
-            k for k, v in h.items() if isinstance(v, str) and v.strip() and k not in skip
+            k
+            for k, v in h.items()
+            if isinstance(v, str) and v.strip() and k not in skip
         ]
-        text_parts = [f"{k}: {h[k]}" for k in fields if isinstance(h.get(k), str) and h[k].strip()]
+        text_parts = [
+            f"{k}: {h[k]}" for k in fields if isinstance(h.get(k), str) and h[k].strip()
+        ]
         out.append(("\n".join(text_parts), doc_id, id_field))
     return out
 

@@ -50,7 +50,11 @@ ARTICLE_HITS: list[HIT_CASE] = [
 ]
 
 SUPPLIER_CATALOGS_DE_HITS: list[HIT_CASE] = [
-    ("ACO Drain Rinne Monoblock", ["-1284896587609186235", "7647252346056341609"], "id"),
+    (
+        "ACO Drain Rinne Monoblock",
+        ["-1284896587609186235", "7647252346056341609"],
+        "id",
+    ),
     ("Entwässerung Ablauf", ["6470805727571075019", "-1284896587609186235"], "id"),
 ]
 
@@ -121,17 +125,19 @@ async def main() -> None:
             grand_total += t
 
     elapsed = time.perf_counter() - t0
-    avg_consistency = consistency_sum / consistency_groups if consistency_groups else 0.0
+    avg_consistency = (
+        consistency_sum / consistency_groups if consistency_groups else 0.0
+    )
     avg_stable = stable_sum / consistency_groups if consistency_groups else 0.0
 
-    avg_query_latency_ms = (
-        elapsed / grand_total * 1000 if grand_total else 0.0
-    )
+    avg_query_latency_ms = elapsed / grand_total * 1000 if grand_total else 0.0
     print("\n════════════════════════════════════════════════════════════")
     print(f"eval_v2 summary: {elapsed:.1f}s total")
     if grand_total:
-        print(f"  adversarial+synthetic hit@5: {grand_hits}/{grand_total} = "
-              f"{grand_hits / grand_total:.4f}")
+        print(
+            f"  adversarial+synthetic hit@5: {grand_hits}/{grand_total} = "
+            f"{grand_hits / grand_total:.4f}"
+        )
     print(f"  paraphrase consistency:      {avg_consistency:.4f}")
     print(f"  paraphrase stable_top1:      {avg_stable:.4f}")
     print(f"  avg query latency:           {avg_query_latency_ms:.0f}ms")
