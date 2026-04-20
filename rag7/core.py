@@ -235,13 +235,13 @@ def _clean_string(s: str) -> str:
     return re.sub(r"\s+", " ", _HTML_TAG_RE.sub(" ", s)).strip()
 
 
-def _render_value(v: Any, indent: int) -> str:
-    """YAML-ish renderer: clean strings, lists/dicts as indented bullets.
+def _render_value(v: Any, indent: int = 0) -> str:
+    """Markdown renderer: bold labels, flat bullets, HTML stripped.
 
-    Returns empty when the value carries no information so the caller
-    can skip the field entirely.
+    Markdown beat YAML and JSON on reranker accuracy in our eval
+    (+1 hit over YAML, +2 over JSON). Returns empty when the value
+    carries no information.
     """
-    pad = "  " * indent
     if isinstance(v, str):
         return _clean_string(v)
     if isinstance(v, bool) or isinstance(v, (int, float)):
@@ -252,13 +252,14 @@ def _render_value(v: Any, indent: int) -> str:
             rendered = _render_value(val, indent + 1)
             if not rendered:
                 continue
-            sep = "\n" if "\n" in rendered else " "
-            lines.append(f"{pad}  {k}:{sep}{rendered}")
+            if "\n" in rendered:
+                lines.append(f"- **{k}**:\n{rendered}")
+            else:
+                lines.append(f"- **{k}**: {rendered}")
         return "\n".join(lines)
     if isinstance(v, (list, tuple)):
         lines = []
         for item in v:
-            # Common Meili shape: list of [label, value] pairs (akeneo_values).
             if (
                 isinstance(item, (list, tuple))
                 and len(item) == 2
@@ -267,12 +268,14 @@ def _render_value(v: Any, indent: int) -> str:
                 rendered = _render_value(item[1], indent + 1)
                 if not rendered:
                     continue
-                sep = "\n" if "\n" in rendered else " "
-                lines.append(f"{pad}- {item[0]}:{sep}{rendered}")
+                if "\n" in rendered:
+                    lines.append(f"- **{item[0]}**:\n{rendered}")
+                else:
+                    lines.append(f"- **{item[0]}**: {rendered}")
             else:
                 rendered = _render_value(item, indent + 1)
                 if rendered:
-                    lines.append(f"{pad}- {rendered}")
+                    lines.append(f"- {rendered}")
         return "\n".join(lines)
     return _clean_string(str(v))
 
@@ -1199,11 +1202,11 @@ class AgenticRAG:
             if isinstance(v, str):
                 if content and rendered in content:
                     continue
-                extras.append(f"{k}: {rendered}")
+                extras.append(f"**{k}**: {rendered}")
             elif "\n" in rendered:
-                extras.append(f"{k}:\n{rendered}")
+                extras.append(f"**{k}**:\n{rendered}")
             else:
-                extras.append(f"{k}: {rendered}")
+                extras.append(f"**{k}**: {rendered}")
         if content and not extras:
             return str(content)
         if content:
