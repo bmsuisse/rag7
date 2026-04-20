@@ -227,6 +227,56 @@ def _align_embed_fn_with_backend(
     return _adapt_embed_fn_to_dim(embed_fn, target)
 
 
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _clean_string(s: str) -> str:
+    """Strip HTML tags and collapse whitespace — reranker sees clean prose."""
+    return re.sub(r"\s+", " ", _HTML_TAG_RE.sub(" ", s)).strip()
+
+
+def _render_value(v: Any, indent: int) -> str:
+    """YAML-ish renderer: clean strings, lists/dicts as indented bullets.
+
+    Returns empty when the value carries no information so the caller
+    can skip the field entirely.
+    """
+    pad = "  " * indent
+    if isinstance(v, str):
+        return _clean_string(v)
+    if isinstance(v, bool) or isinstance(v, (int, float)):
+        return str(v)
+    if isinstance(v, dict):
+        lines: list[str] = []
+        for k, val in v.items():
+            rendered = _render_value(val, indent + 1)
+            if not rendered:
+                continue
+            sep = "\n" if "\n" in rendered else " "
+            lines.append(f"{pad}  {k}:{sep}{rendered}")
+        return "\n".join(lines)
+    if isinstance(v, (list, tuple)):
+        lines = []
+        for item in v:
+            # Common Meili shape: list of [label, value] pairs (akeneo_values).
+            if (
+                isinstance(item, (list, tuple))
+                and len(item) == 2
+                and isinstance(item[0], str)
+            ):
+                rendered = _render_value(item[1], indent + 1)
+                if not rendered:
+                    continue
+                sep = "\n" if "\n" in rendered else " "
+                lines.append(f"{pad}- {item[0]}:{sep}{rendered}")
+            else:
+                rendered = _render_value(item, indent + 1)
+                if rendered:
+                    lines.append(f"{pad}- {rendered}")
+        return "\n".join(lines)
+    return _clean_string(str(v))
+
+
 def _detect_category_fields(backend: SearchBackend) -> list[str]:
     """Heuristic: find metadata fields likely to encode a category/group.
 
@@ -1129,30 +1179,31 @@ class AgenticRAG:
         return SystemMessage(prompt)
 
     def _hit_to_text(self, h: dict) -> str:
-        """Render a hit as text for the reranker + generation LLM.
+        """Render a hit as clean YAML-ish text for the reranker + LLM.
 
-        If the backend's ``content`` field already concatenates every
-        useful field (most ingestion pipelines do this) we trust it.
-        Otherwise we dynamically flatten every string/number/list/dict
-        field so structured attributes (``akeneo_values``, product
-        specs, stock info) reach the generation LLM — not just the
-        pre-baked summary.
+        Every non-trivial field is emitted (minus ids/URLs/language) so
+        structured attributes (akeneo_values, specs, stock info) reach
+        the ranker. Lists render as indented bullet lines, nested dicts
+        as indented key/value, and HTML tags are stripped — clean prose
+        scores better than raw Python reprs on reranker models (see
+        improvingagents.com/blog/best-nested-data-format, YAML>JSON>XML).
         """
         content = h.get("content")
         extras: list[str] = []
         for k, v in h.items():
-            if k in _SKIP_FIELDS or k == "content" or not v:
+            if k in _SKIP_FIELDS or k == "content" or v is None or v == "":
+                continue
+            rendered = _render_value(v, indent=0)
+            if not rendered:
                 continue
             if isinstance(v, str):
-                text = v.strip()
-                if text and (not content or text not in content):
-                    extras.append(f"{k}: {text}")
-            elif isinstance(v, (int, float, bool)):
-                extras.append(f"{k}: {v}")
-            elif isinstance(v, (list, dict)):
-                # Structured attributes (e.g. akeneo_values) — stringify so
-                # the LLM can read spec tuples like ('Flaschenöffner', 'ja').
-                extras.append(f"{k}: {v}")
+                if content and rendered in content:
+                    continue
+                extras.append(f"{k}: {rendered}")
+            elif "\n" in rendered:
+                extras.append(f"{k}:\n{rendered}")
+            else:
+                extras.append(f"{k}: {rendered}")
         if content and not extras:
             return str(content)
         if content:
