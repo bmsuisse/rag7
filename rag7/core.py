@@ -114,6 +114,24 @@ def _auto_cache_save(schema_sig: str, config: dict[str, Any]) -> None:
         pass
 
 
+def _has_is_own_brand_field(backend: SearchBackend) -> bool:
+    try:
+        return "is_own_brand" in backend.get_index_config().filterable_attributes
+    except Exception:
+        return False
+
+
+_BRAND_FIELDS = frozenset({"supplier_name", "brand", "manufacturer_name", "vendor"})
+
+
+def _is_brand_intent(intent: FilterIntent) -> bool:
+    return intent.field in _BRAND_FIELDS and intent.operator in (
+        "=",
+        "==",
+        "CONTAINS",
+    )
+
+
 def _detect_embedder_name(backend: SearchBackend, *, fallback: str) -> str:
     """Pick an embedder name declared on the index, else ``fallback``.
 
@@ -807,6 +825,7 @@ class AgenticRAG:
         self.boost_fn = boost_fn
         self.sort_fields = sort_fields
         self.num_fields = num_fields
+        self._has_own_brand_field = _has_is_own_brand_field(self.backend)
         if base_filter is not None:
             warnings.warn(
                 "`base_filter` is deprecated, use `filter` instead.",
@@ -1192,21 +1211,28 @@ class AgenticRAG:
         improvingagents.com/blog/best-nested-data-format, YAML>JSON>XML).
         """
         content = h.get("content")
-        extras: list[str] = []
+        # Pre-render everything, then emit smallest → largest so the
+        # reranker's rerank_chars window always catches short dense fields
+        # (article_name, supplier, category, search terms, specs) before
+        # bulky ones (stock_data per-warehouse lists). Without this
+        # ordering, a doc's payload gets truncated inside the wrong field
+        # — e.g. 7794905 ProOne Multi-Tool has "Flaschenöffner" buried at
+        # char 20795 inside akeneo_values, past the default 2048-char cap.
+        rendered_items: list[tuple[int, str]] = []
         for k, v in h.items():
             if k in _SKIP_FIELDS or k == "content" or v is None or v == "":
                 continue
-            rendered = _render_value(v, indent=0)
-            if not rendered:
+            r = _render_value(v, indent=0)
+            if not r:
                 continue
-            if isinstance(v, str):
-                if content and rendered in content:
-                    continue
-                extras.append(f"**{k}**: {rendered}")
-            elif "\n" in rendered:
-                extras.append(f"**{k}**:\n{rendered}")
+            if isinstance(v, str) and content and r in content:
+                continue
+            if isinstance(v, str) or "\n" not in r:
+                line = f"**{k}**: {r}"
             else:
-                extras.append(f"**{k}**: {rendered}")
+                line = f"**{k}**:\n{r}"
+            rendered_items.append((len(line), line))
+        extras = [line for _, line in sorted(rendered_items, key=lambda x: x[0])]
         if content and not extras:
             return str(content)
         if content:
@@ -1695,7 +1721,10 @@ class AgenticRAG:
             (broad_docs, _bm25_empty), (intent, filter_docs) = await asyncio.gather(
                 broad_coro,
                 self._afilter_search_with_intent(
-                    state.question, state.query, precomputed=intent
+                    state.question,
+                    state.query,
+                    precomputed=intent,
+                    variants=state.query_variants,
                 ),
             )
             if filter_docs and len(filter_docs) >= self.top_k:
@@ -1729,13 +1758,14 @@ class AgenticRAG:
         question: str,
         query: str,
         precomputed: FilterIntent | None = None,
+        variants: list[str] | None = None,
     ) -> tuple[FilterIntent | None, list[Document]]:
         # Reuse an intent already detected upstream (e.g. in _aparallel_start)
         # to skip the duplicate LLM classification call.
         intent = precomputed or await self._adetect_filter_intent(question)
         if not intent.field or not intent.value or not intent.operator:
             return None, []
-        docs = await self._afilter_search_from_intent(query, intent)
+        docs = await self._afilter_search_from_intent(query, intent, variants)
         return intent, docs
 
     def _build_filter_expr(self, intent: FilterIntent) -> str:
@@ -1748,7 +1778,10 @@ class AgenticRAG:
         return self.backend.build_filter_expr(intent)
 
     async def _afilter_search_from_intent(
-        self, query: str, intent: FilterIntent
+        self,
+        query: str,
+        intent: FilterIntent,
+        variants: list[str] | None = None,
     ) -> list[Document]:
         filter_expr = self._build_filter_expr(intent)
         limit = int(self.top_k * self.retrieval_factor)
@@ -1759,16 +1792,69 @@ class AgenticRAG:
                 vector = await loop.run_in_executor(None, self.embed_fn, query)
             except Exception:
                 pass
-        try:
-            hits = await loop.run_in_executor(
-                None,
-                self.backend.search,
-                self._make_search_request(
-                    query, limit, vector=vector, filter_expr=filter_expr
-                ),
+
+        # When a filter already pins the brand/category, strip that token
+        # from variant queries so BM25 can match on the remaining keywords
+        # alone. Default matching strategy requires ALL tokens, and docs
+        # often have the brand in supplier but NOT in searchable_attrs
+        # (e.g. 7794905 ProOne Multi-Tool has "proone" in search_term but
+        # not "flaschenöffner") — keeping both tokens filters it out.
+        filter_token = intent.value.lower().strip() if intent.value else ""
+
+        def _strip_filter_token(q: str) -> str:
+            if not filter_token:
+                return q
+            parts = [t for t in q.split() if t.lower().strip("?,!.") != filter_token]
+            return " ".join(parts) if parts else q
+
+        async def _search(expr: str) -> list[dict]:
+            # Multi-arm search if variants are supplied — lets a rewrite
+            # like "bieröffner" → "flaschenöffner" reach the filtered pool
+            # even though the raw query has no literal hits.
+            all_queries = [query] + [v for v in (variants or []) if v and v != query]
+            stripped = [_strip_filter_token(q) for q in all_queries]
+            seen: set[str] = set()
+            unique: list[str] = []
+            for q in stripped:
+                if q and q not in seen:
+                    seen.add(q)
+                    unique.append(q)
+            vecs: list[list[float] | None] = [vector] + [None] * (len(unique) - 1)
+            requests = [
+                self._make_search_request(q, limit, vector=v, filter_expr=expr)
+                for q, v in zip(unique, vecs)
+            ]
+            try:
+                if len(requests) == 1:
+                    return await loop.run_in_executor(
+                        None, self.backend.search, requests[0]
+                    )
+                results = await loop.run_in_executor(
+                    None, self.backend.batch_search, requests
+                )
+                return _rrf_fuse(results)
+            except Exception:
+                return []
+
+        # Brand queries: the user's brand name often matches both a subset
+        # of supplier_name values *and* own-brand SKUs that aren't literally
+        # supplied by that brand (e.g. ProOne-branded items with
+        # supplier_name="BME Strategic Services"). Run both filters in
+        # parallel and merge — neither alone covers the full brand set.
+        if self._has_own_brand_field and _is_brand_intent(intent):
+            brand_hits, own_brand_hits = await asyncio.gather(
+                _search(filter_expr),
+                _search("is_own_brand = true"),
             )
-        except Exception:
-            return []
+            seen: set[str] = set()
+            hits: list[dict] = []
+            for h in brand_hits + own_brand_hits:
+                doc_id = str(h.get("id") or h.get("article_id") or id(h))
+                if doc_id not in seen:
+                    seen.add(doc_id)
+                    hits.append(h)
+        else:
+            hits = await _search(filter_expr)
         return [
             Document(page_content=self._hit_to_text(h), metadata=h)
             for h in hits[:limit]
@@ -3015,12 +3101,18 @@ class AgenticRAG:
         # via query_variants after the fact. This avoids waiting on the
         # filter-intent LLM call (often ~1-3s) before broad search can start.
         init = RAGState(question=query, query=query)
-        filter_intent_task = asyncio.create_task(
-            self._afilter_search_with_intent(query, query)
-        )
         preprocess_task = asyncio.create_task(self._apreprocess(init))
         hyde_task = asyncio.create_task(self._acompute_hyde(query))
         state = await preprocess_task
+
+        # Fire filter+intent search AFTER preprocess so query_variants can
+        # propagate — the raw query alone often misses (e.g. "bieröffner"
+        # without its LLM-generated "flaschenöffner" variant).
+        filter_intent_task = asyncio.create_task(
+            self._afilter_search_with_intent(
+                query, state.query, variants=state.query_variants
+            )
+        )
 
         # Alternative path: preprocess detected "find alternatives for X".
         if state.alternative_to:
@@ -3048,31 +3140,27 @@ class AgenticRAG:
             adaptive_fusion=state.adaptive_fusion,
             hyde_text=hyde_text,
         )
-        # Use filter-intent results when they're already ready (free recall boost),
-        # otherwise cancel the in-flight LLM classification so rerank isn't blocked
-        # by its slow tail. Broad search alone already returns top_k candidates —
-        # filter_docs primarily add recall in ambiguous queries, which is less
-        # critical when broad_docs is fully populated.
+        # Always await the filter branch — it carries recall unique to the
+        # brand/category filter (e.g. "bieröffner von proone" surfaces the
+        # ProOne Multi-Tool only under supplier + is_own_brand filters).
+        # Broad search alone doesn't include those, and cancelling the
+        # filter task drops them silently.
         filter_docs: list[Document] = []
-        if filter_intent_task.done():
-            try:
-                _, filter_docs = filter_intent_task.result()
-            except Exception:
-                pass
-        elif len(broad_docs) < k:
-            # Broad search came back thin — wait for the filter branch to
-            # potentially rescue recall.
-            try:
-                _, filter_docs = await filter_intent_task
-            except Exception:
-                pass
+        try:
+            _, filter_docs = await filter_intent_task
+        except Exception:
+            pass
+        # A strong filter signal (e.g. supplier = ProOne + own-brand
+        # rescue) should own the candidate pool — RRF fusion with
+        # broad_docs penalizes single-list appearances and demotes
+        # filter-exclusive hits like the ProOne Multi-Tool that only
+        # surface under the brand filter.
+        if filter_docs and len(filter_docs) >= k:
+            docs = filter_docs
+        elif filter_docs:
+            docs = self._merge_doc_lists(filter_docs, broad_docs)
         else:
-            filter_intent_task.cancel()
-        docs = (
-            self._merge_doc_lists(filter_docs, broad_docs)
-            if filter_docs
-            else broad_docs
-        )
+            docs = broad_docs
         # Merge fast-path docs for recall (cheap; dedup handled by _merge_doc_lists)
         if fast_docs:
             docs = self._merge_doc_lists(docs, fast_docs)
