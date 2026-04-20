@@ -305,6 +305,9 @@ def _make_azure_embed_fn(
         _embed_cache_put(cache_ns, text, vec)
         return vec
 
+    # Mark the function so _align_embed_fn_with_backend can rebuild it with
+    # the index's native dim (server-side Matryoshka) instead of slicing.
+    _embed._rag7_azure_rebuild = lambda dim: _make_azure_embed_fn(dimensions=dim)  # type: ignore[attr-defined]
     return _embed
 
 

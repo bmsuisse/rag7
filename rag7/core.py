@@ -208,6 +208,14 @@ def _align_embed_fn_with_backend(
             stacklevel=3,
         )
         return embed_fn
+    # If the embedder is a rebuildable Azure client, ask OpenAI for native
+    # {target}-d vectors server-side (text-embedding-3 Matryoshka). Cheaper
+    # than slice+renorm and reuses the cache by dim namespace.
+    rebuild = getattr(embed_fn, "_rag7_azure_rebuild", None)
+    if callable(rebuild):
+        rebuilt = cast(Callable[[str], list[float]] | None, rebuild(target))
+        if rebuilt is not None:
+            return rebuilt
     from .utils import _adapt_embed_fn_to_dim
 
     warnings.warn(
