@@ -114,6 +114,111 @@ def _auto_cache_save(schema_sig: str, config: dict[str, Any]) -> None:
         pass
 
 
+def _detect_embedder_name(backend: SearchBackend, *, fallback: str) -> str:
+    """Pick an embedder name declared on the index, else ``fallback``.
+
+    Meilisearch rejects vector search with an unknown embedder name and
+    silently strips the vector arm — a wrong default collapses hybrid
+    search to BM25. Prefer ``default`` when present; otherwise the first
+    declared name.
+    """
+    try:
+        names = backend.get_index_config().embedders
+    except Exception:
+        return fallback
+    if not names:
+        return fallback
+    if "default" in names:
+        return "default"
+    return names[0]
+
+
+def _validate_embedder_name(backend: SearchBackend, name: str) -> None:
+    """Warn if ``name`` isn't declared on the backend's index.
+
+    Meilisearch silently drops the vector arm when the embedder name is
+    unknown — the query degrades to BM25-only without any error. Surface
+    that at init so users don't blame the retriever for a config typo.
+    """
+    try:
+        names = backend.get_index_config().embedders
+    except Exception:
+        return
+    if names and name not in names:
+        warnings.warn(
+            f"Configured embedder_name={name!r} is not declared on the index "
+            f"(available: {names}). Vector search will silently fall back to "
+            f"BM25-only. Set RAG_EMBEDDER_NAME or pass embedder_name= to one "
+            f"of the available names.",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+
+
+def _align_embed_fn_with_backend(
+    embed_fn: "Callable[[str], list[float]] | None",
+    backend: SearchBackend,
+) -> "Callable[[str], list[float]] | None":
+    """Reconcile ``embed_fn`` output dim with the backend's index dim.
+
+    When the index pins a single vector dimension and the embed function
+    produces a different size, vector search silently returns zero hits (the
+    backend drops the request). Detect once at init and:
+
+    * If all possible index dims are equal to the probe result → no-op.
+    * If exactly one index dim is declared → wrap with slice-and-renormalize
+      so the rest of the pipeline sends the right shape.
+    * Otherwise (multiple dims, no dims, or probe fails) → leave the fn alone.
+
+    The wrapper is a best-effort projection — it works well for
+    Matryoshka-trained models (text-embedding-3-*, BGE-M3, Nomic, Jina v3)
+    and at worst is no worse than the zero-hit status quo.
+    """
+    if embed_fn is None:
+        return None
+    try:
+        cfg = backend.get_index_config()
+    except Exception:
+        return embed_fn
+    dims = set(cfg.embedder_dims.values())
+    if not dims:
+        return embed_fn
+    try:
+        probe = embed_fn("probe")
+    except Exception:
+        return embed_fn
+    probe_dim = len(probe)
+    if probe_dim in dims:
+        return embed_fn
+    if len(dims) != 1:
+        warnings.warn(
+            f"Embed fn returns {probe_dim}-d vectors but index declares "
+            f"multiple dims {sorted(dims)}; vector search may miss. "
+            "Provide an embed_fn with a matching dimension.",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+        return embed_fn
+    target = next(iter(dims))
+    if probe_dim < target:
+        warnings.warn(
+            f"Embed fn returns {probe_dim}-d vectors but index expects "
+            f"{target}-d — can't up-project. Use a larger embedder.",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+        return embed_fn
+    from .utils import _adapt_embed_fn_to_dim
+
+    warnings.warn(
+        f"Embed fn returns {probe_dim}-d but index expects {target}-d; "
+        "auto-adapting via slice+L2 renorm (Matryoshka-style).",
+        RuntimeWarning,
+        stacklevel=3,
+    )
+    return _adapt_embed_fn_to_dim(embed_fn, target)
+
+
 def _detect_category_fields(backend: SearchBackend) -> list[str]:
     """Heuristic: find metadata fields likely to encode a category/group.
 
@@ -602,9 +707,12 @@ class AgenticRAG:
         self.n_swarm_queries = n_swarm_queries or int(
             os.getenv("RAG_N_SWARM_QUERIES", "4")
         )
-        self.embedder_name = embedder_name or os.getenv(
-            "RAG_EMBEDDER_NAME", "azure_openai"
-        )
+        explicit_embedder_name = embedder_name or os.getenv("RAG_EMBEDDER_NAME")
+        if explicit_embedder_name:
+            self.embedder_name = explicit_embedder_name
+            _validate_embedder_name(self.backend, explicit_embedder_name)
+        else:
+            self.embedder_name = _detect_embedder_name(self.backend, fallback="default")
         self.semantic_ratio = (
             semantic_ratio
             if semantic_ratio is not None
@@ -622,7 +730,7 @@ class AgenticRAG:
         )
         self.fusion: Literal["rrf", "dbsf"] = fusion or os.getenv("RAG_FUSION", "rrf")  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
         self.instructions = instructions
-        self.embed_fn = embed_fn
+        self.embed_fn = _align_embed_fn_with_backend(embed_fn, self.backend)
         self.hyde_style_hint = hyde_style_hint
         self.group_field = group_field
         self.name_field = name_field
