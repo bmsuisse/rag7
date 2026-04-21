@@ -245,6 +245,38 @@ def _align_embed_fn_with_backend(
     return _adapt_embed_fn_to_dim(embed_fn, target)
 
 
+def _typo_candidates(query: str, max_variants: int = 10) -> list[str]:
+    """Edit-distance-1 rewrites for tokens the user may have mistyped.
+
+    Mutates words ≥5 chars without digits (dims like "125mm" are usually
+    exact). Meilisearch multisearch runs all variants in one batch.
+    """
+    words = query.split()
+    seen: set[str] = {query}
+    out: list[str] = []
+
+    def _emit(parts: list[str]) -> bool:
+        variant = " ".join(parts)
+        if variant in seen:
+            return False
+        seen.add(variant)
+        out.append(variant)
+        return len(out) >= max_variants
+
+    for i, w in enumerate(words):
+        bare = w.strip("?,!.")
+        if len(bare) < 5 or any(c.isdigit() for c in bare):
+            continue
+        for j in range(1, len(bare) - 1):
+            if _emit(words[:i] + [bare[:j] + bare[j + 1 :]] + words[i + 1 :]):
+                return out
+        for j in range(len(bare) - 2):
+            swapped = bare[:j] + bare[j + 1] + bare[j] + bare[j + 2 :]
+            if _emit(words[:i] + [swapped] + words[i + 1 :]):
+                return out
+    return out
+
+
 _FILTER_INTENT_WORDS = frozenset(
     {
         # German
@@ -3019,6 +3051,29 @@ class AgenticRAG:
         promoted_ids = [*need, *(rid for rid in ranked_ids if rid not in set(need))]
         return [id_to_doc[i] for i in promoted_ids]
 
+    def _merge_with_priority(
+        self,
+        priority: list[Document],
+        fill: list[Document],
+        keep_top: int = 5,
+    ) -> list[Document]:
+        """Pin ``priority[:keep_top]`` at the front, then RRF-fuse the rest."""
+        seen: set[str] = set()
+        out: list[Document] = []
+        for d in priority[:keep_top]:
+            doc_id = _doc_id(d.metadata)
+            if doc_id in seen:
+                continue
+            seen.add(doc_id)
+            out.append(d)
+        for d in self._merge_doc_lists(priority[keep_top:], fill):
+            doc_id = _doc_id(d.metadata)
+            if doc_id in seen:
+                continue
+            seen.add(doc_id)
+            out.append(d)
+        return out
+
     def _merge_doc_lists(self, *doc_lists: list[Document]) -> list[Document]:
         raw = [[d.metadata for d in dl] for dl in doc_lists]
         fused_meta = _rrf_fuse(raw)
@@ -3053,7 +3108,7 @@ class AgenticRAG:
             d.metadata.get("id") or d.metadata.get("_id") or d.page_content[:40]
             for d in docs[:3]
         )
-        cached = _cache.load("relevance-v2", query, top_ids)
+        cached = _cache.load("relevance-v3", query, top_ids)
         if cached:
             try:
                 return RelevanceCheck.model_validate(cached)
@@ -3068,15 +3123,24 @@ class AgenticRAG:
                 await self._relevance_chain.ainvoke(
                     [
                         self._sys(
-                            "Strictly judge if snippets DIRECTLY answer the question. "
-                            "Set makes_sense=true and confidence>=0.9 only if a snippet "
-                            "clearly contains the answer. Otherwise lower confidence."
+                            "Judge whether any of the snippets plausibly answers the "
+                            "question. Treat synonyms, paraphrases, multilingual "
+                            "equivalents, and partial matches as satisfying the "
+                            "question if they cover the user's intent — e.g. "
+                            "'Bieröffner' is the same as 'Flaschenöffner'; "
+                            "'Schuhputzer' is the same as 'Schuhreiniger'; "
+                            "a multi-tool that includes the asked-for function "
+                            "counts as a match. Set makes_sense=true whenever a "
+                            "snippet is a plausible answer, even if wording differs. "
+                            "Use confidence to reflect how clearly the snippet "
+                            "addresses the question (0.9+ for direct, 0.5-0.8 for "
+                            "plausible, <0.3 for clearly off-topic)."
                         ),
                         HumanMessage(f"Question: {query}\n\nSnippets:\n{snippets}"),
                     ]
                 ),
             )
-            _cache.save("relevance-v2", query, top_ids, value=result.model_dump())
+            _cache.save("relevance-v3", query, top_ids, value=result.model_dump())
             return result
         except Exception:
             return RelevanceCheck(makes_sense=False, confidence=0.0)
@@ -3147,151 +3211,134 @@ class AgenticRAG:
     async def _aretrieve_documents(
         self, query: str, top_k: int | None = None
     ) -> tuple[str, list[Document]]:
+        """Iterative BM25 → rerank → grade loop, escalating variants on grade fail.
+
+        Each iteration widens the variant set and lets later iterations
+        blend in semantic search. Grader short-circuits on confident
+        BM25 matches to avoid LLM latency on the happy path.
+        """
         k = top_k or self.top_k
-        limit = int(k * self.retrieval_factor)
+        state = RAGState(question=query, query=query)
 
-        # Fast path: cheap keyword search; if top-score confident → rerank + return.
-        # BUT skip fast-accept when the query has a filter-intent word
-        # ("von", "de", "from", etc.) — these queries want brand/category
-        # filtering that the fast path can't do, and fast-accept would
-        # bypass the filter-search + pin logic entirely.
-        has_filter_word = any(
-            w.lower().strip("?,!.") in _FILTER_INTENT_WORDS for w in query.split()
-        )
-        fast_docs = await self._afast_keyword_retrieve(query, limit)
-        top_score = (
-            float(fast_docs[0].metadata.get("_rankingScore", 0.0)) if fast_docs else 0.0
-        )
-        score_th = self._fast_accept_score
-        conf_th = self._fast_accept_confidence
-        fast_accept = (
-            not has_filter_word
-            and score_th is not None
-            and top_score >= score_th
-            and len(fast_docs) >= k
-        )
-        if (
-            not fast_accept
-            and not has_filter_word
-            and conf_th is not None
-            and fast_docs
-            and len(fast_docs) >= k
-        ):
-            rc = await self._arelevance_check(query, fast_docs)
-            fast_accept = rc.makes_sense and rc.confidence >= conf_th
-        if fast_accept:
-            state = RAGState(
-                question=query, query=query, documents=fast_docs, iterations=1
-            )
-            state = await self._arerank(state)
-            return state.query, state.documents[:k]
-
-        # Slow path: fan out preprocess, HyDE, filter-intent AND broad search in
-        # parallel. Broad search uses the raw query/question — when preprocess
-        # returns an LLM-refined query, we lose that refinement for broad search,
-        # but when enable_preprocess_llm is False (common) the preprocessed query
-        # is just stop-word-stripped, so we prepend that as an extra_bm25 variant
-        # via query_variants after the fact. This avoids waiting on the
-        # filter-intent LLM call (often ~1-3s) before broad search can start.
-        init = RAGState(question=query, query=query)
-        preprocess_task = asyncio.create_task(self._apreprocess(init))
-        hyde_task = asyncio.create_task(self._acompute_hyde(query))
-        # Intent DETECTION fires in parallel with preprocess — the LLM call
-        # is ~1-2s and independent of query rewrite. Filter SEARCH still
-        # waits for preprocess so it can use the LLM's query_variants.
-        intent_detect_task = asyncio.create_task(self._adetect_filter_intent(query))
+        preprocess_task = asyncio.create_task(self._apreprocess(state))
+        intent_task = asyncio.create_task(self._adetect_filter_intent(query))
         state = await preprocess_task
         try:
-            intent = await intent_detect_task
+            intent = await intent_task
         except Exception:
-            intent = None
+            intent = FilterIntent(field=None, value="", operator="")
 
-        filter_intent_task = asyncio.create_task(
-            self._afilter_search_with_intent(
-                query,
-                state.query,
-                precomputed=intent,
-                variants=state.query_variants,
-            )
-        )
-
-        # Alternative path: preprocess detected "find alternatives for X".
         if state.alternative_to:
-            filter_intent_task.cancel()
-            hyde_task.cancel()
             return await self._aalternative_retrieve(
                 state.query, state.alternative_to, k
             )
 
-        hyde_text = await hyde_task
+        has_intent = bool(intent.field and intent.value and intent.operator)
+        variants: list[str] = list(state.query_variants)
+        variants.extend(_typo_candidates(state.query, max_variants=10))
 
-        # When BM25 completely fails (typo / transliteration / no keyword match),
-        # fall back to near-pure semantic search to recover recall.
-        # bm25_fallback_threshold=None disables the fallback entirely.
-        effective_semantic_ratio = state.adaptive_semantic_ratio
-        fb_th = self._bm25_fallback_threshold
-        if fb_th is not None and top_score < fb_th and effective_semantic_ratio is None:
-            effective_semantic_ratio = self._bm25_fallback_semantic_ratio
-        broad_docs, bm25_empty = await self._asearch(
-            state.query,
-            question=state.question,
-            extra_bm25=state.query_variants,
-            factor=self.retrieval_factor,
-            adaptive_semantic_ratio=effective_semantic_ratio,
-            adaptive_fusion=state.adaptive_fusion,
-            hyde_text=hyde_text,
-        )
-        # Always await the filter branch — it carries recall unique to the
-        # brand/category filter (e.g. "bieröffner von proone" surfaces the
-        # ProOne Multi-Tool only under supplier + is_own_brand filters).
-        # Broad search alone doesn't include those, and cancelling the
-        # filter task drops them silently.
-        filter_docs: list[Document] = []
-        filter_intent_result: FilterIntent | None = None
-        try:
-            filter_intent_result, filter_docs = await filter_intent_task
-        except Exception:
-            pass
-        # A strong filter signal (e.g. supplier = ProOne + own-brand
-        # rescue) should own the candidate pool — RRF fusion with
-        # broad_docs penalizes single-list appearances and demotes
-        # filter-exclusive hits like the ProOne Multi-Tool that only
-        # surface under the brand filter.
-        if filter_docs and len(filter_docs) >= k:
-            docs = filter_docs
-        elif filter_docs:
-            docs = self._merge_doc_lists(filter_docs, broad_docs)
-        else:
-            docs = broad_docs
-        # Merge fast-path docs for recall (cheap; dedup handled by _merge_doc_lists)
-        if fast_docs:
-            docs = self._merge_doc_lists(docs, fast_docs)
-        state = state.model_copy(update={"documents": docs, "iterations": 1})
-        # Typo/OOV rescue: every BM25 arm returned zero, so the query's
-        # literal tokens aren't in the corpus vocabulary. Vector hits may
-        # have filled `docs` with semantically-adjacent noise (especially
-        # when the query embedder differs from the ingest embedder), which
-        # would otherwise short-circuit the swarm path. Force the LLM
-        # rewrite so variants like "Flaschenöffner" for "bieröffner" get a
-        # chance to hit BM25.
-        if not state.documents or (bm25_empty and not filter_docs):
-            state = await self._aswarm_retrieve(state)
-        state = await self._arerank(state)
-        # When a confident filter fired (brand / supplier / category with
-        # a specific value), ensure filter_docs[0] lands in the final
-        # top-3 — Cohere sometimes demotes the exact filter hit in favor
-        # of other reranker-pleasing docs in the same brand pool. Trust
-        # the filter signal for cross-brand queries.
-        if (
-            filter_docs
-            and filter_intent_result is not None
-            and filter_intent_result.field
-            and filter_intent_result.value
-        ):
-            ranked = self._pin_filter_top(state.documents, filter_docs)
-            if ranked is not state.documents:
-                state = state.model_copy(update={"documents": ranked})
+        pool: list[Document] = []
+        max_iter = max(1, self.max_iter)
+
+        for iter_n in range(max_iter):
+            semantic = state.adaptive_semantic_ratio
+            if semantic is None and iter_n >= 1:
+                semantic = 0.5
+
+            tasks: list[Any] = [
+                self._asearch(
+                    state.query,
+                    question=state.question,
+                    extra_bm25=variants,
+                    factor=self.retrieval_factor,
+                    adaptive_semantic_ratio=semantic,
+                    adaptive_fusion=state.adaptive_fusion,
+                )
+            ]
+            if has_intent:
+                tasks.append(
+                    self._afilter_search_from_intent(
+                        state.query, intent, variants=variants
+                    )
+                )
+            results = await asyncio.gather(*tasks)
+            broad_docs, _ = results[0]
+            filter_docs: list[Document] = results[1] if len(results) > 1 else []
+
+            # Always keep the unfiltered arm as a rescue — if the filter
+            # LLM picked the wrong field/value, broad_docs still has
+            # correct hits. Merging both (filter-first) preserves recall.
+            new_docs = (
+                self._merge_doc_lists(filter_docs, broad_docs)
+                if filter_docs
+                else broad_docs
+            )
+
+            pool = self._merge_with_priority(pool, new_docs, keep_top=20)
+            state = state.model_copy(
+                update={"documents": pool[:20], "pre_reranked": False}
+            )
+            state = await self._arerank(state)
+
+            if has_intent and filter_docs:
+                ranked = self._pin_filter_top(state.documents, filter_docs)
+                if ranked is not state.documents:
+                    state = state.model_copy(update={"documents": ranked})
+
+            if await self._agrader_ok(state.query, state.documents):
+                break
+            if iter_n + 1 >= max_iter:
+                break
+
+            extra = await self._agen_query_variants(query, variants)
+            variants.extend(v for v in extra if v not in variants)
+
         return state.query, state.documents[:k]
+
+    async def _agrader_ok(self, query: str, docs: list[Document]) -> bool:
+        """Stop iterating when retrieval is clearly good.
+
+        Score short-circuit requires a strong BM25 match (≥0.9) — below
+        that we always pay for the LLM relevance check, and only accept
+        when it says makes_sense=True with confidence ≥0.7. That way
+        borderline pools keep iterating until variants help or we run
+        out of budget.
+        """
+        if not docs:
+            return False
+        top_score = float(docs[0].metadata.get("_rankingScore", 0.0) or 0.0)
+        if top_score >= 0.9:
+            return True
+        try:
+            rc = await self._arelevance_check(query, docs)
+        except Exception:
+            return True
+        return rc.makes_sense and rc.confidence >= 0.7
+
+    async def _agen_query_variants(
+        self, question: str, already_tried: list[str]
+    ) -> list[str]:
+        """LLM proposes fresh query angles, avoiding already-tried phrasings."""
+        prior = ", ".join(already_tried[-6:]) if already_tried else "(none)"
+        try:
+            result = cast(
+                MultiQuery,
+                await self._multi_query_chain.ainvoke(
+                    [
+                        self._sys(
+                            f"Generate {self.n_swarm_queries} alternative search queries. "
+                            f"Already tried: {prior}. "
+                            "Use different phrasings — synonyms, DE/FR/IT/EN "
+                            "translations, narrower/broader terms, product codes. "
+                            "Keep each 3-6 words."
+                        ),
+                        HumanMessage(question),
+                    ]
+                ),
+            )
+            return list(result.queries[: self.n_swarm_queries])
+        except Exception:
+            return []
 
     def retrieve_documents(
         self, query: str, top_k: int | None = None
