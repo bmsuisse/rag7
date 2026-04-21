@@ -246,46 +246,33 @@ def _align_embed_fn_with_backend(
 
 
 def _typo_candidates(query: str, max_variants: int = 10) -> list[str]:
-    """Edit-distance-1 rewrites of a query: per-letter deletions + adjacent swaps.
+    """Edit-distance-1 rewrites for tokens the user may have mistyped.
 
-    Only mutates tokens of length ≥5 without digits (dimensions like
-    "125mm" or IDs are usually exact). A Meilisearch multisearch can try
-    many spellings in a single batch, so we generate up to ``max_variants``
-    plausible corrections for tokens the user might have mistyped
-    ("Maurekrelle" → "Maurerkelle", "Kreissageblatt" → "Kreissägeblatt"
-    doesn't work — that one needs substitution, which Meilisearch's own
-    typo tolerance handles — but "gweaschen" → "gewaschen" does).
+    Mutates words ≥5 chars without digits (dims like "125mm" are usually
+    exact). Meilisearch multisearch runs all variants in one batch.
     """
     words = query.split()
-    if not words:
-        return []
-    seen: set[str] = set()
+    seen: set[str] = {query}
     out: list[str] = []
 
-    def _emit(variant: str) -> None:
-        if variant != query and variant not in seen:
-            seen.add(variant)
-            out.append(variant)
+    def _emit(parts: list[str]) -> bool:
+        variant = " ".join(parts)
+        if variant in seen:
+            return False
+        seen.add(variant)
+        out.append(variant)
+        return len(out) >= max_variants
 
     for i, w in enumerate(words):
         bare = w.strip("?,!.")
         if len(bare) < 5 or any(c.isdigit() for c in bare):
             continue
-        # Per-position deletion (covers dropped letters)
         for j in range(1, len(bare) - 1):
-            _emit(" ".join(words[:i] + [bare[:j] + bare[j + 1 :]] + words[i + 1 :]))
-            if len(out) >= max_variants:
+            if _emit(words[:i] + [bare[:j] + bare[j + 1 :]] + words[i + 1 :]):
                 return out
-        # Adjacent swap (covers transposition typos)
         for j in range(len(bare) - 2):
-            _emit(
-                " ".join(
-                    words[:i]
-                    + [bare[:j] + bare[j + 1] + bare[j] + bare[j + 2 :]]
-                    + words[i + 1 :]
-                )
-            )
-            if len(out) >= max_variants:
+            swapped = bare[:j] + bare[j + 1] + bare[j] + bare[j + 2 :]
+            if _emit(words[:i] + [swapped] + words[i + 1 :]):
                 return out
     return out
 
@@ -3070,29 +3057,21 @@ class AgenticRAG:
         fill: list[Document],
         keep_top: int = 5,
     ) -> list[Document]:
-        """Stage-aware merge: pin ``priority[:keep_top]`` at the front.
-
-        When iterating retrieval stages (standard → swarm → filter-free),
-        we don't want stage-N's noisy additions to demote a candidate that
-        stage-0 already correctly surfaced. Reserve the first ``keep_top``
-        slots for the earlier stage, then fill with the later stage's docs
-        (RRF-fused to preserve their relative order).
-        """
-        seen = set()
+        """Pin ``priority[:keep_top]`` at the front, then RRF-fuse the rest."""
+        seen: set[str] = set()
         out: list[Document] = []
         for d in priority[:keep_top]:
             doc_id = _doc_id(d.metadata)
-            if doc_id not in seen:
-                seen.add(doc_id)
-                out.append(d)
-        # Remaining docs from both lists, fused by RRF
-        rest_priority = [d for d in priority[keep_top:]]
-        fused = self._merge_doc_lists(rest_priority, fill)
-        for d in fused:
+            if doc_id in seen:
+                continue
+            seen.add(doc_id)
+            out.append(d)
+        for d in self._merge_doc_lists(priority[keep_top:], fill):
             doc_id = _doc_id(d.metadata)
-            if doc_id not in seen:
-                seen.add(doc_id)
-                out.append(d)
+            if doc_id in seen:
+                continue
+            seen.add(doc_id)
+            out.append(d)
         return out
 
     def _merge_doc_lists(self, *doc_lists: list[Document]) -> list[Document]:
