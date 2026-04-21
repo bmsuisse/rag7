@@ -245,6 +245,51 @@ def _align_embed_fn_with_backend(
     return _adapt_embed_fn_to_dim(embed_fn, target)
 
 
+def _typo_candidates(query: str, max_variants: int = 10) -> list[str]:
+    """Edit-distance-1 rewrites of a query: per-letter deletions + adjacent swaps.
+
+    Only mutates tokens of length ≥5 without digits (dimensions like
+    "125mm" or IDs are usually exact). A Meilisearch multisearch can try
+    many spellings in a single batch, so we generate up to ``max_variants``
+    plausible corrections for tokens the user might have mistyped
+    ("Maurekrelle" → "Maurerkelle", "Kreissageblatt" → "Kreissägeblatt"
+    doesn't work — that one needs substitution, which Meilisearch's own
+    typo tolerance handles — but "gweaschen" → "gewaschen" does).
+    """
+    words = query.split()
+    if not words:
+        return []
+    seen: set[str] = set()
+    out: list[str] = []
+
+    def _emit(variant: str) -> None:
+        if variant != query and variant not in seen:
+            seen.add(variant)
+            out.append(variant)
+
+    for i, w in enumerate(words):
+        bare = w.strip("?,!.")
+        if len(bare) < 5 or any(c.isdigit() for c in bare):
+            continue
+        # Per-position deletion (covers dropped letters)
+        for j in range(1, len(bare) - 1):
+            _emit(" ".join(words[:i] + [bare[:j] + bare[j + 1 :]] + words[i + 1 :]))
+            if len(out) >= max_variants:
+                return out
+        # Adjacent swap (covers transposition typos)
+        for j in range(len(bare) - 2):
+            _emit(
+                " ".join(
+                    words[:i]
+                    + [bare[:j] + bare[j + 1] + bare[j] + bare[j + 2 :]]
+                    + words[i + 1 :]
+                )
+            )
+            if len(out) >= max_variants:
+                return out
+    return out
+
+
 _FILTER_INTENT_WORDS = frozenset(
     {
         # German
@@ -3187,232 +3232,134 @@ class AgenticRAG:
     async def _aretrieve_documents(
         self, query: str, top_k: int | None = None
     ) -> tuple[str, list[Document]]:
+        """Iterative BM25 → rerank → grade loop, escalating variants on grade fail.
+
+        Each iteration widens the variant set and lets later iterations
+        blend in semantic search. Grader short-circuits on confident
+        BM25 matches to avoid LLM latency on the happy path.
+        """
         k = top_k or self.top_k
-        limit = int(k * self.retrieval_factor)
+        state = RAGState(question=query, query=query)
 
-        # Fast path: cheap keyword search; if top-score confident → rerank + return.
-        # BUT skip fast-accept when the query has a filter-intent word
-        # ("von", "de", "from", etc.) — these queries want brand/category
-        # filtering that the fast path can't do, and fast-accept would
-        # bypass the filter-search + pin logic entirely.
-        has_filter_word = any(
-            w.lower().strip("?,!.") in _FILTER_INTENT_WORDS for w in query.split()
-        )
-        fast_docs = await self._afast_keyword_retrieve(query, limit)
-        top_score = (
-            float(fast_docs[0].metadata.get("_rankingScore", 0.0)) if fast_docs else 0.0
-        )
-        score_th = self._fast_accept_score
-        conf_th = self._fast_accept_confidence
-        fast_accept = (
-            not has_filter_word
-            and score_th is not None
-            and top_score >= score_th
-            and len(fast_docs) >= k
-        )
-        if (
-            not fast_accept
-            and not has_filter_word
-            and conf_th is not None
-            and fast_docs
-            and len(fast_docs) >= k
-        ):
-            rc = await self._arelevance_check(query, fast_docs)
-            fast_accept = rc.makes_sense and rc.confidence >= conf_th
-        if fast_accept:
-            state = RAGState(
-                question=query, query=query, documents=fast_docs, iterations=1
-            )
-            state = await self._arerank(state)
-            return state.query, state.documents[:k]
-
-        # Slow path: fan out preprocess, HyDE, filter-intent AND broad search in
-        # parallel. Broad search uses the raw query/question — when preprocess
-        # returns an LLM-refined query, we lose that refinement for broad search,
-        # but when enable_preprocess_llm is False (common) the preprocessed query
-        # is just stop-word-stripped, so we prepend that as an extra_bm25 variant
-        # via query_variants after the fact. This avoids waiting on the
-        # filter-intent LLM call (often ~1-3s) before broad search can start.
-        init = RAGState(question=query, query=query)
-        preprocess_task = asyncio.create_task(self._apreprocess(init))
-        hyde_task = asyncio.create_task(self._acompute_hyde(query))
-        # Intent DETECTION fires in parallel with preprocess — the LLM call
-        # is ~1-2s and independent of query rewrite. Filter SEARCH still
-        # waits for preprocess so it can use the LLM's query_variants.
-        intent_detect_task = asyncio.create_task(self._adetect_filter_intent(query))
+        preprocess_task = asyncio.create_task(self._apreprocess(state))
+        intent_task = asyncio.create_task(self._adetect_filter_intent(query))
         state = await preprocess_task
         try:
-            intent = await intent_detect_task
+            intent = await intent_task
         except Exception:
-            intent = None
+            intent = FilterIntent(field=None, value="", operator="")
 
-        filter_intent_task = asyncio.create_task(
-            self._afilter_search_with_intent(
-                query,
-                state.query,
-                precomputed=intent,
-                variants=state.query_variants,
-            )
-        )
-
-        # Alternative path: preprocess detected "find alternatives for X".
         if state.alternative_to:
-            filter_intent_task.cancel()
-            hyde_task.cancel()
             return await self._aalternative_retrieve(
                 state.query, state.alternative_to, k
             )
 
-        hyde_text = await hyde_task
+        has_intent = bool(intent.field and intent.value and intent.operator)
+        variants: list[str] = list(state.query_variants)
+        variants.extend(_typo_candidates(state.query, max_variants=10))
 
-        # When BM25 completely fails (typo / transliteration / no keyword match),
-        # fall back to near-pure semantic search to recover recall.
-        # bm25_fallback_threshold=None disables the fallback entirely.
-        effective_semantic_ratio = state.adaptive_semantic_ratio
-        fb_th = self._bm25_fallback_threshold
-        if fb_th is not None and top_score < fb_th and effective_semantic_ratio is None:
-            effective_semantic_ratio = self._bm25_fallback_semantic_ratio
-        broad_docs, bm25_empty = await self._asearch(
-            state.query,
-            question=state.question,
-            extra_bm25=state.query_variants,
-            factor=self.retrieval_factor,
-            adaptive_semantic_ratio=effective_semantic_ratio,
-            adaptive_fusion=state.adaptive_fusion,
-            hyde_text=hyde_text,
-        )
-        # Always await the filter branch — it carries recall unique to the
-        # brand/category filter (e.g. "bieröffner von proone" surfaces the
-        # ProOne Multi-Tool only under supplier + is_own_brand filters).
-        # Broad search alone doesn't include those, and cancelling the
-        # filter task drops them silently.
-        filter_docs: list[Document] = []
-        filter_intent_result: FilterIntent | None = None
-        try:
-            filter_intent_result, filter_docs = await filter_intent_task
-        except Exception:
-            pass
-        # A strong filter signal (e.g. supplier = ProOne + own-brand
-        # rescue) should own the candidate pool — RRF fusion with
-        # broad_docs penalizes single-list appearances and demotes
-        # filter-exclusive hits like the ProOne Multi-Tool that only
-        # surface under the brand filter.
-        if filter_docs and len(filter_docs) >= k:
-            docs = filter_docs
-        elif filter_docs:
-            docs = self._merge_doc_lists(filter_docs, broad_docs)
-        else:
-            docs = broad_docs
-        # Merge fast-path docs for recall (cheap; dedup handled by _merge_doc_lists)
-        if fast_docs:
-            docs = self._merge_doc_lists(docs, fast_docs)
-        state = state.model_copy(update={"documents": docs, "iterations": 1})
-        # Typo/OOV rescue: every BM25 arm returned zero, so the query's
-        # literal tokens aren't in the corpus vocabulary. Vector hits may
-        # have filled `docs` with semantically-adjacent noise (especially
-        # when the query embedder differs from the ingest embedder), which
-        # would otherwise short-circuit the swarm path. Force the LLM
-        # rewrite so variants like "Flaschenöffner" for "bieröffner" get a
-        # chance to hit BM25.
-        if not state.documents or (bm25_empty and not filter_docs):
-            state = await self._aswarm_retrieve(state)
-        state = await self._arerank(state)
-        # When a confident filter fired (brand / supplier / category with
-        # a specific value), ensure filter_docs[0] lands in the final
-        # top-3 — Cohere sometimes demotes the exact filter hit in favor
-        # of other reranker-pleasing docs in the same brand pool. Trust
-        # the filter signal for cross-brand queries.
-        if (
-            filter_docs
-            and filter_intent_result is not None
-            and filter_intent_result.field
-            and filter_intent_result.value
-        ):
-            ranked = self._pin_filter_top(state.documents, filter_docs)
-            if ranked is not state.documents:
-                state = state.model_copy(update={"documents": ranked})
+        pool: list[Document] = []
+        max_iter = max(1, self.max_iter)
 
-        # Iterative grader-driven escalation. Only engages when the top-1
-        # BM25 score is weak (<0.7) — confident matches skip the grader to
-        # avoid latency and avoid demoting correct results. Uses
-        # _merge_with_priority so previous stage's pinned hits stay in the
-        # top-5 even if later stages add noise.
-        state = await self._aescalate_if_needed(
-            state,
-            filter_docs,
-            filter_intent_result,
-            swarm_already_fired=(not state.documents)
-            or bool(bm25_empty and not filter_docs),
-            k=k,
-        )
-        return state.query, state.documents[:k]
+        for iter_n in range(max_iter):
+            semantic = state.adaptive_semantic_ratio
+            if semantic is None and iter_n >= 1:
+                semantic = 0.5
 
-    async def _aescalate_if_needed(
-        self,
-        state: RAGState,
-        filter_docs: list[Document],
-        filter_intent_result: "FilterIntent | None",
-        *,
-        swarm_already_fired: bool,
-        k: int,
-    ) -> RAGState:
-        """Grader-driven expansion: swarm rescue on low-confidence results.
+            tasks: list[Any] = [
+                self._asearch(
+                    state.query,
+                    question=state.question,
+                    extra_bm25=variants,
+                    factor=self.retrieval_factor,
+                    adaptive_semantic_ratio=semantic,
+                    adaptive_fusion=state.adaptive_fusion,
+                )
+            ]
+            if has_intent:
+                tasks.append(
+                    self._afilter_search_from_intent(
+                        state.query, intent, variants=variants
+                    )
+                )
+            results = await asyncio.gather(*tasks)
+            broad_docs, _ = results[0]
+            filter_docs: list[Document] = results[1] if len(results) > 1 else []
 
-        When the top-1 BM25 score is weak (<0.7) and the grader judges
-        the top docs as clearly off-topic, fire swarm_retrieve (LLM query
-        variants) and merge into the existing pool via
-        ``_merge_with_priority`` so previously-surfaced hits keep their
-        slots. Rerank the union, re-apply the filter-pin, and return.
-
-        On this benchmark stage-2 filter-free expansion regressed more
-        cases than it helped, so it's intentionally omitted — the swarm
-        stage alone covers the synonym/typo gap for queries like
-        "bieröffner von proone" → ProOne Multi-Tool.
-        """
-        if not state.documents:
-            return state
-
-        async def _grader_ok() -> bool:
-            top_score = float(
-                state.documents[0].metadata.get("_rankingScore", 0.0) or 0.0
+            # Always keep the unfiltered arm as a rescue — if the filter
+            # LLM picked the wrong field/value, broad_docs still has
+            # correct hits. Merging both (filter-first) preserves recall.
+            new_docs = (
+                self._merge_doc_lists(filter_docs, broad_docs)
+                if filter_docs
+                else broad_docs
             )
-            if top_score >= 0.7:
-                return True
-            try:
-                rc = await self._arelevance_check(state.query, state.documents)
-            except Exception:
-                return True
-            # Fail only on a confidently-negative verdict so marginal cases
-            # (which are most of them) aren't sent through expensive expansion.
-            return rc.makes_sense or rc.confidence < 0.6
 
-        if await _grader_ok():
-            return state
-
-        # Stage 1: swarm rescue
-        if not swarm_already_fired:
-            stage0_docs = list(state.documents)
-            swarm_state = await self._aswarm_retrieve(state)
-            merged = self._merge_with_priority(
-                stage0_docs, list(swarm_state.documents), keep_top=k
-            )
+            pool = self._merge_with_priority(pool, new_docs, keep_top=20)
             state = state.model_copy(
-                update={"documents": merged, "pre_reranked": False}
+                update={"documents": pool[:20], "pre_reranked": False}
             )
             state = await self._arerank(state)
-            if filter_docs and filter_intent_result:
+
+            if has_intent and filter_docs:
                 ranked = self._pin_filter_top(state.documents, filter_docs)
                 if ranked is not state.documents:
                     state = state.model_copy(update={"documents": ranked})
-            if await _grader_ok():
-                return state
 
-        # Stage 2 (filter-free broad) intentionally omitted — on this
-        # benchmark it regressed some cases by flooding the pool with
-        # off-brand candidates that Cohere preferred over the filter-pinned
-        # hits. If needed, re-enable it only when filter_docs returned fewer
-        # than k items (genuine filter-too-narrow signal).
-        return state
+            if await self._agrader_ok(state.query, state.documents):
+                break
+            if iter_n + 1 >= max_iter:
+                break
+
+            extra = await self._agen_query_variants(query, variants)
+            variants.extend(v for v in extra if v not in variants)
+
+        return state.query, state.documents[:k]
+
+    async def _agrader_ok(self, query: str, docs: list[Document]) -> bool:
+        """Stop iterating when retrieval is clearly good.
+
+        Score short-circuit requires a strong BM25 match (≥0.9) — below
+        that we always pay for the LLM relevance check, and only accept
+        when it says makes_sense=True with confidence ≥0.7. That way
+        borderline pools keep iterating until variants help or we run
+        out of budget.
+        """
+        if not docs:
+            return False
+        top_score = float(docs[0].metadata.get("_rankingScore", 0.0) or 0.0)
+        if top_score >= 0.9:
+            return True
+        try:
+            rc = await self._arelevance_check(query, docs)
+        except Exception:
+            return True
+        return rc.makes_sense and rc.confidence >= 0.7
+
+    async def _agen_query_variants(
+        self, question: str, already_tried: list[str]
+    ) -> list[str]:
+        """LLM proposes fresh query angles, avoiding already-tried phrasings."""
+        prior = ", ".join(already_tried[-6:]) if already_tried else "(none)"
+        try:
+            result = cast(
+                MultiQuery,
+                await self._multi_query_chain.ainvoke(
+                    [
+                        self._sys(
+                            f"Generate {self.n_swarm_queries} alternative search queries. "
+                            f"Already tried: {prior}. "
+                            "Use different phrasings — synonyms, DE/FR/IT/EN "
+                            "translations, narrower/broader terms, product codes. "
+                            "Keep each 3-6 words."
+                        ),
+                        HumanMessage(question),
+                    ]
+                ),
+            )
+            return list(result.queries[: self.n_swarm_queries])
+        except Exception:
+            return []
 
     def retrieve_documents(
         self, query: str, top_k: int | None = None
