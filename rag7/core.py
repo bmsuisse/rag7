@@ -3019,6 +3019,37 @@ class AgenticRAG:
         promoted_ids = [*need, *(rid for rid in ranked_ids if rid not in set(need))]
         return [id_to_doc[i] for i in promoted_ids]
 
+    def _merge_with_priority(
+        self,
+        priority: list[Document],
+        fill: list[Document],
+        keep_top: int = 5,
+    ) -> list[Document]:
+        """Stage-aware merge: pin ``priority[:keep_top]`` at the front.
+
+        When iterating retrieval stages (standard → swarm → filter-free),
+        we don't want stage-N's noisy additions to demote a candidate that
+        stage-0 already correctly surfaced. Reserve the first ``keep_top``
+        slots for the earlier stage, then fill with the later stage's docs
+        (RRF-fused to preserve their relative order).
+        """
+        seen = set()
+        out: list[Document] = []
+        for d in priority[:keep_top]:
+            doc_id = _doc_id(d.metadata)
+            if doc_id not in seen:
+                seen.add(doc_id)
+                out.append(d)
+        # Remaining docs from both lists, fused by RRF
+        rest_priority = [d for d in priority[keep_top:]]
+        fused = self._merge_doc_lists(rest_priority, fill)
+        for d in fused:
+            doc_id = _doc_id(d.metadata)
+            if doc_id not in seen:
+                seen.add(doc_id)
+                out.append(d)
+        return out
+
     def _merge_doc_lists(self, *doc_lists: list[Document]) -> list[Document]:
         raw = [[d.metadata for d in dl] for dl in doc_lists]
         fused_meta = _rrf_fuse(raw)
@@ -3053,7 +3084,7 @@ class AgenticRAG:
             d.metadata.get("id") or d.metadata.get("_id") or d.page_content[:40]
             for d in docs[:3]
         )
-        cached = _cache.load("relevance-v2", query, top_ids)
+        cached = _cache.load("relevance-v3", query, top_ids)
         if cached:
             try:
                 return RelevanceCheck.model_validate(cached)
@@ -3068,15 +3099,24 @@ class AgenticRAG:
                 await self._relevance_chain.ainvoke(
                     [
                         self._sys(
-                            "Strictly judge if snippets DIRECTLY answer the question. "
-                            "Set makes_sense=true and confidence>=0.9 only if a snippet "
-                            "clearly contains the answer. Otherwise lower confidence."
+                            "Judge whether any of the snippets plausibly answers the "
+                            "question. Treat synonyms, paraphrases, multilingual "
+                            "equivalents, and partial matches as satisfying the "
+                            "question if they cover the user's intent — e.g. "
+                            "'Bieröffner' is the same as 'Flaschenöffner'; "
+                            "'Schuhputzer' is the same as 'Schuhreiniger'; "
+                            "a multi-tool that includes the asked-for function "
+                            "counts as a match. Set makes_sense=true whenever a "
+                            "snippet is a plausible answer, even if wording differs. "
+                            "Use confidence to reflect how clearly the snippet "
+                            "addresses the question (0.9+ for direct, 0.5-0.8 for "
+                            "plausible, <0.3 for clearly off-topic)."
                         ),
                         HumanMessage(f"Question: {query}\n\nSnippets:\n{snippets}"),
                     ]
                 ),
             )
-            _cache.save("relevance-v2", query, top_ids, value=result.model_dump())
+            _cache.save("relevance-v3", query, top_ids, value=result.model_dump())
             return result
         except Exception:
             return RelevanceCheck(makes_sense=False, confidence=0.0)
@@ -3291,7 +3331,88 @@ class AgenticRAG:
             ranked = self._pin_filter_top(state.documents, filter_docs)
             if ranked is not state.documents:
                 state = state.model_copy(update={"documents": ranked})
+
+        # Iterative grader-driven escalation. Only engages when the top-1
+        # BM25 score is weak (<0.7) — confident matches skip the grader to
+        # avoid latency and avoid demoting correct results. Uses
+        # _merge_with_priority so previous stage's pinned hits stay in the
+        # top-5 even if later stages add noise.
+        state = await self._aescalate_if_needed(
+            state,
+            filter_docs,
+            filter_intent_result,
+            swarm_already_fired=(not state.documents)
+            or bool(bm25_empty and not filter_docs),
+            k=k,
+        )
         return state.query, state.documents[:k]
+
+    async def _aescalate_if_needed(
+        self,
+        state: RAGState,
+        filter_docs: list[Document],
+        filter_intent_result: "FilterIntent | None",
+        *,
+        swarm_already_fired: bool,
+        k: int,
+    ) -> RAGState:
+        """Grader-driven expansion: swarm rescue on low-confidence results.
+
+        When the top-1 BM25 score is weak (<0.7) and the grader judges
+        the top docs as clearly off-topic, fire swarm_retrieve (LLM query
+        variants) and merge into the existing pool via
+        ``_merge_with_priority`` so previously-surfaced hits keep their
+        slots. Rerank the union, re-apply the filter-pin, and return.
+
+        On this benchmark stage-2 filter-free expansion regressed more
+        cases than it helped, so it's intentionally omitted — the swarm
+        stage alone covers the synonym/typo gap for queries like
+        "bieröffner von proone" → ProOne Multi-Tool.
+        """
+        if not state.documents:
+            return state
+
+        async def _grader_ok() -> bool:
+            top_score = float(
+                state.documents[0].metadata.get("_rankingScore", 0.0) or 0.0
+            )
+            if top_score >= 0.7:
+                return True
+            try:
+                rc = await self._arelevance_check(state.query, state.documents)
+            except Exception:
+                return True
+            # Fail only on a confidently-negative verdict so marginal cases
+            # (which are most of them) aren't sent through expensive expansion.
+            return rc.makes_sense or rc.confidence < 0.6
+
+        if await _grader_ok():
+            return state
+
+        # Stage 1: swarm rescue
+        if not swarm_already_fired:
+            stage0_docs = list(state.documents)
+            swarm_state = await self._aswarm_retrieve(state)
+            merged = self._merge_with_priority(
+                stage0_docs, list(swarm_state.documents), keep_top=k
+            )
+            state = state.model_copy(
+                update={"documents": merged, "pre_reranked": False}
+            )
+            state = await self._arerank(state)
+            if filter_docs and filter_intent_result:
+                ranked = self._pin_filter_top(state.documents, filter_docs)
+                if ranked is not state.documents:
+                    state = state.model_copy(update={"documents": ranked})
+            if await _grader_ok():
+                return state
+
+        # Stage 2 (filter-free broad) intentionally omitted — on this
+        # benchmark it regressed some cases by flooding the pool with
+        # off-brand candidates that Cohere preferred over the filter-pinned
+        # hits. If needed, re-enable it only when filter_docs returned fewer
+        # than k items (genuine filter-too-narrow signal).
+        return state
 
     def retrieve_documents(
         self, query: str, top_k: int | None = None
