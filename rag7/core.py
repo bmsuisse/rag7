@@ -259,6 +259,20 @@ _FILTER_INTENT_WORDS = frozenset(
     w for ws in _FILTER_INTENT_WORDS_BY_LANG.values() for w in ws
 )
 
+# Negation tokens across all supported languages (DE/FR/IT/EN).
+# Used to guard preprocess-skip heuristics — a query with a negation word
+# requires the LLM to interpret exclusion semantics correctly.
+_NEGATION_TOKENS: frozenset[str] = frozenset({
+    # German
+    "nicht", "ohne", "kein", "keine", "keinen", "keinem",
+    # English
+    "not", "no", "without", "except", "exclude", "excluding",
+    # French
+    "sans", "pas", "aucun", "aucune",
+    # Italian
+    "senza", "non", "nessun", "nessuna",
+})
+
 
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
 
