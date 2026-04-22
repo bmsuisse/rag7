@@ -393,36 +393,32 @@ def embed_fn_from_langchain(
     embeddings: Any,
     *,
     prefer_query: bool = True,
+    cache_dir: str | Path | None = None,
+    namespace: str = "embeddings",
 ) -> Callable[[str], list[float]]:
     """Wrap any LangChain ``Embeddings`` instance as an rag7 ``embed_fn``.
 
-    Use this to plug LangChain's own caching / batching / provider layers
-    into rag7. The most common case:
+    Pass ``cache_dir`` to enable transparent disk caching via
+    ``CacheBackedEmbeddings`` — no manual wiring required:
 
     .. code-block:: python
 
         from langchain_openai import AzureOpenAIEmbeddings
-        from langchain_classic.embeddings import CacheBackedEmbeddings
-        from langchain.storage import LocalFileStore
-
-        base = AzureOpenAIEmbeddings(...)
-        store = LocalFileStore("./embed-cache")
-        cached = CacheBackedEmbeddings.from_bytes_store(
-            base, store, namespace="text-embedding-3-small",
-            query_embedding_store=store,  # CacheBackedEmbeddings skips query
-                                          # caching by default — opt in.
-        )
-
         from rag7.utils import embed_fn_from_langchain
+
         rag = AgenticRAG(
             index="docs",
             backend=MeilisearchBackend("docs"),
-            embed_fn=embed_fn_from_langchain(cached),
+            embed_fn=embed_fn_from_langchain(
+                AzureOpenAIEmbeddings(...),
+                cache_dir="~/.cache/rag7/embeddings",
+                namespace="text-embedding-3-small",
+            ),
         )
 
-    Use the built-in ``_make_azure_embed_fn()`` for the default deployment
-    and single-file JSON cache — this adapter is for users who want a
-    different store (Redis, S3, shared filesystem, etc.).
+    Or bring your own ``CacheBackedEmbeddings`` for custom stores (Redis,
+    S3, shared filesystem, etc.) — the cache bypass bug is handled
+    automatically (``embed_documents`` is called so the cache is hit).
 
     Parameters
     ----------
@@ -430,10 +426,40 @@ def embed_fn_from_langchain(
         Any object exposing ``.embed_query(text) -> list[float]`` and/or
         ``.embed_documents([text]) -> list[list[float]]``.
     prefer_query:
-        If True (default), call ``.embed_query()`` — matches rag7's single-
-        text usage. Set False to call ``.embed_documents([text])[0]`` which
-        is what ``CacheBackedEmbeddings`` caches by default.
+        Call ``.embed_query()`` when available (default True). Ignored when
+        ``cache_dir`` is set or a ``CacheBackedEmbeddings`` instance is
+        detected — those cache via ``embed_documents``.
+    cache_dir:
+        Directory for a ``LocalFileStore``-backed ``CacheBackedEmbeddings``.
+        Expands ``~``. Requires ``langchain`` (already a rag7 dependency).
+    namespace:
+        Cache key prefix — use the model name to avoid collisions between
+        different embedding deployments sharing the same ``cache_dir``.
     """
+    if cache_dir is not None:
+        from langchain.embeddings import CacheBackedEmbeddings
+        from langchain.storage import LocalFileStore
+
+        store = LocalFileStore(str(Path(cache_dir).expanduser()))
+        embeddings = CacheBackedEmbeddings.from_bytes_store(
+            embeddings,
+            store,
+            namespace=namespace,
+            query_embedding_store=store,
+        )
+        prefer_query = False
+
+    # CacheBackedEmbeddings caches embed_documents, not embed_query (unless
+    # query_embedding_store is set). Route through embed_documents to hit cache.
+    if prefer_query:
+        try:
+            from langchain.embeddings import CacheBackedEmbeddings
+
+            if isinstance(embeddings, CacheBackedEmbeddings):
+                prefer_query = False
+        except ImportError:
+            pass
+
     if prefer_query and hasattr(embeddings, "embed_query"):
         return embeddings.embed_query  # type: ignore[no-any-return]
     if hasattr(embeddings, "embed_documents"):
