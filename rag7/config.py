@@ -62,8 +62,17 @@ class RAGConfig(BaseModel):
 
     # ── Rerank-skip confidence (avoid reranker call on obvious hits) ─────────
     # None → never skip reranker even on obviously-matching queries.
-    rerank_skip_dominance: float | None = Field(default=0.85, ge=0.0, le=1.0)
+    rerank_skip_dominance: float | None = Field(default=0.93, ge=0.0, le=1.0)
     rerank_skip_gap: float = Field(default=0.1, ge=0.0, le=1.0)
+
+    # ── Query language(s) ────────────────────────────────────────────────────
+    # Controls which filter-intent words (von/de/from/…) are recognised when
+    # deciding whether a query contains a brand/category constraint.
+    # Use ISO 639-1 codes. Default includes all supported languages; narrow
+    # this to your catalog's actual language(s) to avoid false positives
+    # (e.g. French "de" firing on an English-only catalog).
+    # Supported: "de" (German), "fr" (French), "it" (Italian), "en" (English).
+    query_languages: list[str] = Field(default_factory=lambda: ["de", "fr", "it", "en"])
 
     # ── Name-field match boost ───────────────────────────────────────────────
     # After reranking, docs whose primary name_field matches query tokens
@@ -161,7 +170,7 @@ class RAGConfig(BaseModel):
                 "RAG_FAST_ACCEPT_CONFIDENCE", "0.9"
             ),
             rerank_skip_dominance=_env_float_or_none(
-                "RAG_RERANK_SKIP_DOMINANCE", "0.85"
+                "RAG_RERANK_SKIP_DOMINANCE", "0.93"
             ),
             rerank_skip_gap=float(os.getenv("RAG_RERANK_SKIP_GAP", "0.1")),
             name_field_boost_max=float(os.getenv("RAG_NAME_FIELD_BOOST_MAX", "0.1")),
@@ -186,6 +195,11 @@ class RAGConfig(BaseModel):
             weak_model=os.getenv("RAG_WEAK_MODEL") or None,
             thinking_model=os.getenv("RAG_THINKING_MODEL") or None,
             grader_model=os.getenv("RAG_GRADER_MODEL") or None,
+            query_languages=[
+                lang.strip()
+                for lang in os.getenv("RAG_QUERY_LANGUAGES", "de,fr,it,en").split(",")
+                if lang.strip()
+            ],
         )
 
     @classmethod

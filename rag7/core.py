@@ -246,49 +246,17 @@ def _align_embed_fn_with_backend(
     return _adapt_embed_fn_to_dim(embed_fn, target)
 
 
+_FILTER_INTENT_WORDS_BY_LANG: dict[str, frozenset[str]] = {
+    "de": frozenset({"von", "vom", "aus", "ohne", "nicht", "kein", "keine", "für", "fur", "bei", "mit"}),
+    "fr": frozenset({"de", "du", "des", "sans", "pour", "par", "pas", "avec", "chez"}),
+    "it": frozenset({"di", "da", "del", "della", "senza", "non", "per", "con"}),
+    "en": frozenset({"from", "without", "not", "no", "for", "by", "of", "with"}),
+}
+
+# Fallback used before instance is available (fast-accept path uses module scope).
+# Covers all languages — instances narrow this via self._filter_intent_words.
 _FILTER_INTENT_WORDS = frozenset(
-    {
-        # German
-        "von",
-        "vom",
-        "aus",
-        "ohne",
-        "nicht",
-        "kein",
-        "keine",
-        "für",
-        "fur",
-        "bei",
-        "mit",
-        # French
-        "de",
-        "du",
-        "des",
-        "sans",
-        "pour",
-        "par",
-        "pas",
-        "avec",
-        "chez",
-        # Italian
-        "di",
-        "da",
-        "del",
-        "della",
-        "senza",
-        "non",
-        "per",
-        "con",
-        # English
-        "from",
-        "without",
-        "not",
-        "no",
-        "for",
-        "by",
-        "of",
-        "with",
-    }
+    w for ws in _FILTER_INTENT_WORDS_BY_LANG.values() for w in ws
 )
 
 
@@ -988,6 +956,11 @@ class AgenticRAG:
             self._fast_accept_confidence = config.fast_accept_confidence
             self._rerank_skip_dominance = config.rerank_skip_dominance
             self._rerank_skip_gap = config.rerank_skip_gap
+            self._filter_intent_words: frozenset[str] = frozenset(
+                w
+                for lang in config.query_languages
+                for w in _FILTER_INTENT_WORDS_BY_LANG.get(lang, frozenset())
+            )
             self.expert_top_n = config.expert_top_n
             self.expert_threshold = config.expert_threshold
             self._name_field_boost_max = config.name_field_boost_max
@@ -1022,8 +995,18 @@ class AgenticRAG:
             )
             self._fast_accept_score: float | None = 0.85
             self._fast_accept_confidence: float | None = 0.9
-            self._rerank_skip_dominance: float | None = 0.85
+            self._rerank_skip_dominance: float | None = 0.93
             self._rerank_skip_gap: float = 0.1
+            langs = [
+                l.strip()
+                for l in os.getenv("RAG_QUERY_LANGUAGES", "de,fr,it,en").split(",")
+                if l.strip()
+            ]
+            self._filter_intent_words: frozenset[str] = frozenset(
+                w
+                for lang in langs
+                for w in _FILTER_INTENT_WORDS_BY_LANG.get(lang, frozenset())
+            )
             self._enable_hyde = True
             self._enable_filter_intent = True
             self._enable_reasoning = True
@@ -1449,7 +1432,7 @@ class AgenticRAG:
         # variant). In that case fall through to the LLM path.
         words = state.question.split()
         has_filter_word = any(
-            w.lower().strip("?,!.") in _FILTER_INTENT_WORDS for w in words
+            w.lower().strip("?,!.") in self._filter_intent_words for w in words
         )
         if len(words) <= self._short_query_threshold and not has_filter_word:
             raw = _strip_stop_words(state.question) or state.question
@@ -3205,49 +3188,6 @@ class AgenticRAG:
         # token (year/version), or uppercase code. Embedded digits (bm25, oauth2)
         # are technical jargon, not entities — don't count them.
         words = question.strip().split()
-        # Filter-intent tokens (from/by/without) across DE/FR/IT/EN.
-        _FILTER_INTENT_WORDS = {
-            # German
-            "von",
-            "vom",
-            "aus",
-            "ohne",
-            "nicht",
-            "kein",
-            "keine",
-            "für",
-            "fur",
-            "bei",
-            "mit",
-            # French
-            "de",
-            "du",
-            "des",
-            "sans",
-            "pour",
-            "par",
-            "pas",
-            "avec",
-            "chez",
-            # Italian
-            "di",
-            "da",
-            "del",
-            "della",
-            "senza",
-            "non",
-            "per",
-            "con",
-            # English
-            "from",
-            "without",
-            "not",
-            "no",
-            "for",
-            "by",
-            "of",
-            "with",
-        }
         # Strong signals: numeric tokens (years/sizes/IDs), all-caps codes (M12, SDS),
         # or lowercase product codes like m12/t25/g10 (single letter + 2+ digits).
         # Lowercase codes are common in casual user queries ("hilti anker bolzen m12").
@@ -3262,7 +3202,7 @@ class AgenticRAG:
             i > 0 and w and w[0].isupper() and not w.isupper()
             for i, w in enumerate(words)
         )
-        has_filter_word = any(w.lower() in _FILTER_INTENT_WORDS for w in words)
+        has_filter_word = any(w.lower() in self._filter_intent_words for w in words)
         # Short queries (≤3 words) without an explicit filter-intent word
         # ("von"/"ohne"/"from"/"without"/…) are almost always keyword bags —
         # users dropping "Bosch Winkelschleifer 125mm" aren't asking for a
@@ -3613,7 +3553,7 @@ class AgenticRAG:
         # filtering that the fast path can't do, and fast-accept would
         # bypass the filter-search + pin logic entirely.
         has_filter_word = any(
-            w.lower().strip("?,!.") in _FILTER_INTENT_WORDS for w in query.split()
+            w.lower().strip("?,!.") in self._filter_intent_words for w in query.split()
         )
         fast_docs = await self._afast_keyword_retrieve(query, limit)
         top_score = (
