@@ -3602,7 +3602,11 @@ class AgenticRAG:
         has_filter_word = any(
             w.lower().strip("?,!.") in self._filter_intent_words for w in query.split()
         )
-        fast_docs = await self._afast_keyword_retrieve(query, limit)
+        fast_docs = (
+            []
+            if has_filter_word
+            else await self._afast_keyword_retrieve(query, limit)
+        )
         top_score = (
             float(fast_docs[0].metadata.get("_rankingScore", 0.0)) if fast_docs else 0.0
         )
