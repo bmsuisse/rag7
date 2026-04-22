@@ -55,6 +55,8 @@ class RAGState(BaseModel):
     expert_fired: bool = False
     pre_reranked: bool = False
     trace: list[dict[str, Any]] = Field(default_factory=list)
+    grader_feedback: str | None = None
+    grader_confidence: float | None = None
 
 
 class SearchQuery(BaseModel):
@@ -69,6 +71,13 @@ class SearchQuery(BaseModel):
 class QualityAssessment(BaseModel):
     reason: str
     sufficient: bool
+
+
+class AnswerGrade(BaseModel):
+    sufficient: bool
+    confidence: float = Field(ge=0.0, le=1.0)
+    reason: str
+    suggestion: str
 
 
 class RelevanceCheck(BaseModel):

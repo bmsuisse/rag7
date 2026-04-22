@@ -33,6 +33,7 @@ from .backend import (
     _MultiBackend,
 )
 from .models import (
+    AnswerGrade,
     CollectionIntent,
     ConversationTurn,
     FilterIntent,
@@ -297,6 +298,44 @@ _HTML_TAG_RE = re.compile(r"<[^>]+>")
 def _clean_string(s: str) -> str:
     """Strip HTML tags and collapse whitespace — reranker sees clean prose."""
     return re.sub(r"\s+", " ", _HTML_TAG_RE.sub(" ", s)).strip()
+
+
+def _doc_to_grader_text(doc: "Document") -> str:
+    """Render document for grader context: identity fields first, then all akeneo text.
+
+    _hit_to_text sorts shortest→longest for the reranker, which pushes long product
+    descriptions (akeneo_values.Beschreibung lang) past the preview_chars cutoff.
+    This function puts article identity + ALL akeneo text fields first so the grader
+    can verify relevance even for articles whose name doesn't match the query term
+    (e.g. 'ProOne Multi-Tool 12 in 1 Inox' containing 'Flaschenöffner' in description).
+    """
+    m = doc.metadata
+    lines: list[str] = []
+    for key in ("article_name", "article_id", "brand", "supplier_name",
+                "product_group_l1", "product_group_l2", "product_group_l3",
+                "search_terms"):
+        v = m.get(key)
+        if v:
+            lines.append(f"**{key}**: {_clean_string(str(v))}")
+    akeneo = m.get("akeneo_values")
+    if isinstance(akeneo, dict):
+        for k, v in akeneo.items():
+            if isinstance(v, str) and v.strip():
+                lines.append(f"**{k}**: {_clean_string(v)}")
+    return "\n".join(lines) if lines else doc.page_content[:1500]
+
+
+def _filter_bohrer_variants(question: str, corrected_query: str, variants: list[str]) -> list[str]:
+    """Drop variants containing drill-related terms when the original query does not.
+
+    Guards against drill/screwdriver subtype confusion (Akkuschrauber →
+    Akkuschraubbohrer, Bohrschrauber) without touching the LLM prompt or cache.
+    Queries that already mention drilling (e.g. Bohrhammer) are unaffected.
+    """
+    orig = (question + " " + corrected_query).lower()
+    if "bohrer" in orig or "bohrschrauber" in orig:
+        return variants
+    return [v for v in variants if "bohrer" not in v.lower() and "bohrschrauber" not in v.lower()]
 
 
 _MAX_LIST_ITEMS = 8
@@ -916,6 +955,14 @@ class AgenticRAG:
             )
         else:
             self._thinking_llm = self._llm
+        # Grader tier: optional dedicated model (e.g. mini to avoid brain rate-limits).
+        # Falls back to thinking_llm so default behavior is unchanged.
+        if config is not None and config.grader_model:
+            self._grader_llm: BaseChatModel = self._resolve_llm(
+                config.grader_model, timeout=60
+            )
+        else:
+            self._grader_llm = self._thinking_llm
         self._reranker = reranker or self._default_reranker()
         self._expert_reranker = expert_reranker
         self.expert_top_n = expert_top_n or int(os.getenv("RAG_EXPERT_TOP_N", "10"))
@@ -949,6 +996,9 @@ class AgenticRAG:
             self._enable_reasoning = config.enable_reasoning
             self._enable_quality_gate = config.enable_quality_gate
             self._enable_preprocess_llm = config.enable_preprocess_llm
+            self._enable_final_grade = config.enable_final_grade
+            self._final_grade_threshold = config.final_grade_threshold
+            self._enable_swarm_grade = config.enable_swarm_grade
             self._rerank_timeout_s = config.rerank_timeout_s
             self._llm_timeout_s = config.llm_timeout_s
             self.max_iter = config.max_iter
@@ -979,6 +1029,9 @@ class AgenticRAG:
             self._enable_reasoning = True
             self._enable_quality_gate = True
             self._enable_preprocess_llm = True
+            self._enable_final_grade = False
+            self._final_grade_threshold = 0.7
+            self._enable_swarm_grade = False
             self._rerank_timeout_s = 30.0
             self._llm_timeout_s = 60.0
             self._name_field_boost_max: float = float(
@@ -1016,6 +1069,9 @@ class AgenticRAG:
         )
         self._reasoning_chain = self._thinking_llm.with_structured_output(
             ReasoningVerdict, method="json_schema"
+        )
+        self._grade_chain = self._grader_llm.with_structured_output(
+            AnswerGrade, method="json_schema"
         )
 
         self._toolset = RAGToolset(self)
@@ -1156,6 +1212,8 @@ class AgenticRAG:
                 self._enable_filter_intent = bool(config["enable_filter_intent"])
             if "enable_preprocess_llm" in config:
                 self._enable_preprocess_llm = bool(config["enable_preprocess_llm"])
+            if "enable_reasoning" in config:
+                self._enable_reasoning = bool(config["enable_reasoning"])
             if "short_query_threshold" in config:
                 self._short_query_threshold = int(config["short_query_threshold"])
             if "preview_chars" in config:
@@ -1412,12 +1470,12 @@ class AgenticRAG:
             )
             self._trace(new, "preprocess", t0, path="short_skip", query=raw)
             return new
-        cached = _cache.load("preprocess-v3", self._domain_hint or "", state.question)
+        cached = _cache.load("preprocess-v5", self._domain_hint or "", state.question)
         if cached:
             try:
                 result = SearchQuery.model_validate(cached)
                 raw = _strip_stop_words(state.question)
-                variants = result.variants[:3]
+                variants = _filter_bohrer_variants(state.question, result.query, result.variants[:3])
                 if raw and raw.lower() != result.query.lower():
                     variants = [raw] + variants
                 updates: dict = {
@@ -1442,7 +1500,12 @@ class AgenticRAG:
                             "Extract 2-5 concise search keywords from the user's question. "
                             "Return ONLY essential nouns, entities, and technical terms. "
                             "Omit question words, common verbs, and stop words (e.g. find, search, what, how, give me). "
-                            "Preserve identifiers, codes, and specialized terms exactly. "
+                            "Correct obvious spelling mistakes in product names, brand names, and German/Italian "
+                            "words to their standard form. "
+                            "Also restore German umlauts when users omit them: 'oe'→'ö', 'ae'→'ä', 'ue'→'ü', "
+                            "or when a bare vowel clearly substitutes an umlaut "
+                            "(e.g. 'bieroffner'→'Bieröffner', 'Klosetsitz'→'Klosettsitz'). "
+                            "Preserve alphanumeric codes and technical identifiers exactly (e.g. DHR171RTJ, M12, SDS-Plus, 18V). "
                             + (
                                 f"Domain context: {self._domain_hint} "
                                 if self._domain_hint
@@ -1450,6 +1513,7 @@ class AgenticRAG:
                             )
                             + "Also set 'variants': 2-3 more specific alternative keyword phrasings — "
                             "use technical names, codes, or narrower terminology for the same concept. "
+                            "Variants must use correctly-spelled standard forms; never echo misspelled words from the input. "
                             "Avoid broader synonyms. Keep keywords in the same language as the query. "
                             "Also set 'semantic_ratio' (0.0-1.0): how much to weight semantic/vector "
                             "search vs keyword/BM25. "
@@ -1473,13 +1537,13 @@ class AgenticRAG:
                 ),
             )
             _cache.save(
-                "preprocess-v3",
+                "preprocess-v5",
                 self._domain_hint or "",
                 state.question,
                 value=result.model_dump(),
             )
             raw = _strip_stop_words(state.question)
-            variants = result.variants[:3]
+            variants = _filter_bohrer_variants(state.question, result.query, result.variants[:3])
             if raw and raw.lower() != result.query.lower():
                 variants = [raw] + variants
             updates: dict = {
@@ -1564,11 +1628,14 @@ class AgenticRAG:
                 **extra,
             )
 
-        requests = [
-            _req(query),
-            _req(hyde_bm25),
-            _req(query, vector=vector, semantic_ratio=hybrid_ratio),
-        ]
+        requests = [_req(query)]
+        # Only add a second BM25 arm when hyde_bm25 differs from the primary
+        # query (i.e. HyDE generated a longer doc-like text). When they are
+        # the same the second arm is a duplicate that double-counts the primary
+        # BM25 result in RRF fusion, unfairly outweighing variant/vector arms.
+        if hyde_bm25 != query:
+            requests.append(_req(hyde_bm25))
+        requests.append(_req(query, vector=vector, semantic_ratio=hybrid_ratio))
         if vector and hybrid_ratio < 1.0:
             requests.append(_req(query, vector=vector, semantic_ratio=1.0))
         seen = {query, hyde_bm25}
@@ -1689,8 +1756,18 @@ class AgenticRAG:
         t0 = time.perf_counter()
         state = await self._aroute_collections(state)
 
-        # Generate query variants AND detect filter intent in parallel
+        # Generate query variants AND detect filter intent in parallel.
+        # Prefer precomputed variants from the preprocessor (state.query_variants)
+        # when available — they include synonym expansions (e.g. "Flaschenöffner"
+        # for "Bieröffner") that the cached multi-query LLM call may not have.
         async def _gen_variants() -> list[str]:
+            if state.query_variants:
+                base = state.query_variants[: self.n_swarm_queries]
+                # Prepend rewritten query if it differs and isn't already there
+                rewritten = state.query
+                if rewritten and rewritten != state.question and rewritten not in base:
+                    base = [rewritten] + base[: self.n_swarm_queries - 1]
+                return base or [state.query]
             cached = _cache.load("multi-query-v1", self.n_swarm_queries, state.question)
             if cached and isinstance(cached, list):
                 return cached[: self.n_swarm_queries] or [state.query]
@@ -1782,6 +1859,11 @@ class AgenticRAG:
         )
         pool = max(self.top_k * factor, self.rerank_top_n * 4)
         query, docs = await self._aretrieve_documents(state.question, top_k=pool)
+        # Don't throw away good first-pass docs when a retry retrieval returns
+        # nothing. Quality gate rejects → rewrite → empty second-pass would
+        # replace valid candidates with [], leading to a cascading give_up.
+        if not docs and state.documents:
+            docs = state.documents
         new = state.model_copy(
             update={
                 "query": query,
@@ -1867,6 +1949,11 @@ class AgenticRAG:
                 if q and q not in seen:
                     seen.add(q)
                     unique.append(q)
+            # Cap at 3 arms. Keep the main query arm first (holds the semantic
+            # vector); then prefer longer (more specific) stripped variants over
+            # short generic ones (e.g. "Bieröffner Flaschenöffner" beats "Öffner").
+            if len(unique) > 3:
+                unique = unique[:1] + sorted(unique[1:], key=lambda s: -len(s))[:2]
             vecs: list[list[float] | None] = [vector] + [None] * (len(unique) - 1)
             requests = [
                 self._make_search_request(q, limit, vector=v, filter_expr=expr)
@@ -1909,7 +1996,10 @@ class AgenticRAG:
         ]
 
     def _make_rerank_docs(self, docs: list[Document]) -> list[str]:
-        return [d.page_content[: self.rerank_chars] for d in docs]
+        # Use structured rendering (identity fields + akeneo first) so the
+        # reranker sees product descriptions within rerank_chars even when
+        # _hit_to_text's shortest→longest ordering would push them past the cutoff.
+        return [_doc_to_grader_text(d)[: self.rerank_chars] for d in docs]
 
     def _apply_boost(
         self,
@@ -2099,6 +2189,8 @@ class AgenticRAG:
         rerank_docs = self._make_rerank_docs(capped_docs)
         effective_top_n = len(rerank_docs)
         rerank_query = state.question or state.query
+        if state.grader_feedback:
+            rerank_query = f"{state.grader_feedback}. {rerank_query}"
 
         try:
             arerank_fn = getattr(self._reranker, "arerank", None)
@@ -2171,13 +2263,14 @@ class AgenticRAG:
             f"[{i + 1}] {d.page_content}"
             for i, d in enumerate(state.documents[: self.top_k])
         )
-        messages: list = [
-            self._sys(
-                "Answer using only the provided context. "
-                "Cite sources inline using [n] numbers that match the context blocks. "
-                "Say so if the context is insufficient."
-            ),
-        ]
+        sys_content = (
+            "Answer using only the provided context. "
+            "Cite sources inline using [n] numbers that match the context blocks. "
+            "Say so if the context is insufficient."
+        )
+        if state.grader_feedback:
+            sys_content += f"\n\nSearch guidance for this attempt: {state.grader_feedback}"
+        messages: list = [self._sys(sys_content)]
         for turn in state.history:
             messages.append(HumanMessage(turn.question))
             messages.append(AIMessage(turn.answer))
@@ -2202,7 +2295,9 @@ class AgenticRAG:
 
     async def _arewrite(self, state: RAGState) -> RAGState:
         t0 = time.perf_counter()
-        if not state.documents:
+        if not state.documents and not self._enable_swarm_grade:
+            # When swarm_grade is active, the swarm_grade node handles retrieval —
+            # just preprocess and return; don't call _aswarm_retrieve here.
             if state.adaptive_semantic_ratio is None:
                 pre = await self._apreprocess(state)
                 state = state.model_copy(
@@ -2217,7 +2312,16 @@ class AgenticRAG:
             self._trace(new, "rewrite", t0, path="swarm", docs=len(new.documents))
             return new
 
-        if state.quality_ok is False and state.documents:
+        if state.grader_feedback and state.documents:
+            prompt = (
+                "The previous search did not return the right products. "
+                f'Grader feedback: "{state.grader_feedback}". '
+                f'Previous query: "{state.query}". '
+                "Rewrite the query following the feedback. "
+                "Return a precise query of 1-4 keywords AND 2-3 spelling/form variants "
+                "(e.g. with/without umlaut, compound vs. spaced). No filler words."
+            )
+        elif state.quality_ok is False and state.documents:
             top_snippet = state.documents[0].page_content[: self._preview_chars]
             prompt = (
                 "The search returned documents but they are NOT relevant to the question. "
@@ -2399,7 +2503,8 @@ class AgenticRAG:
                 state.documents[0].metadata.get("_rankingScore", 0.0) or 0.0
             )
         if (
-            state.iterations <= 1
+            state.filter_intent is None  # filter queries need LLM check to detect wrong product type
+            and state.iterations <= 1
             and len(state.documents) >= self.top_k
             and top_score >= 0.7
         ):
@@ -2452,6 +2557,319 @@ class AgenticRAG:
         )
         return new
 
+    async def _afinal_grade(self, state: RAGState) -> RAGState:
+        t0 = time.perf_counter()
+        if not self._enable_final_grade:
+            self._trace(state, "final_grade", t0, path="disabled")
+            return state
+        if not state.answer or state.iterations >= self.max_iter:
+            self._trace(state, "final_grade", t0, path="skip")
+            return state
+
+        snippets = "\n\n".join(
+            f"[{i + 1}] {_doc_to_grader_text(d)}"
+            for i, d in enumerate(state.documents[:5])
+        )
+        grade: AnswerGrade | None = None
+        err = None
+        try:
+            grade = cast(
+                AnswerGrade,
+                await self._grade_chain.ainvoke(
+                    [
+                        self._sys(
+                            "You are a strict quality grader for a product search assistant. "
+                            "Given the user question, retrieved document snippets, and generated answer, "
+                            "decide if the answer correctly identifies the product(s) the user was looking for. "
+                            "sufficient=true only if the answer names or describes the right product. "
+                            "If NOT sufficient, write a specific, actionable suggestion — "
+                            "e.g. 'Search for Rothenberger Rohrzange, the brand was misspelled' or "
+                            "'User wants a short hammer handle (Hammerstiel), not a complete hammer'. "
+                            "Keep suggestion under 30 words. confidence: 1.0=definitely correct, 0.0=clearly wrong."
+                        ),
+                        HumanMessage(
+                            f"Question: {state.question}\n\n"
+                            f"Retrieved snippets:\n{snippets}\n\n"
+                            f"Generated answer:\n{state.answer}"
+                        ),
+                    ]
+                ),
+            )
+        except Exception as e:
+            err = type(e).__name__
+
+        if grade is None:
+            self._trace(state, "final_grade", t0, path="error", error=err)
+            return state
+
+        # confidence: 1.0=correct, 0.0=wrong. Retry on confident wrong judgment
+        # (conf >= threshold) OR clearly wrong (conf <= 1-threshold).
+        should_retry = not grade.sufficient and (
+            grade.confidence >= self._final_grade_threshold
+            or grade.confidence <= 1.0 - self._final_grade_threshold
+        )
+        update: dict[str, Any] = {
+            "grader_confidence": grade.confidence,
+            "grader_feedback": grade.suggestion if should_retry else None,
+        }
+        new = state.model_copy(update=update)
+        self._trace(
+            new,
+            "final_grade",
+            t0,
+            sufficient=grade.sufficient,
+            confidence=grade.confidence,
+            error=err,
+        )
+        return new
+
+    async def _agrade_docs(
+        self, question: str, docs: list[Document]
+    ) -> "AnswerGrade | None":
+        """Grade retrieved docs without generating an answer — used by swarm_grade."""
+        snippets = "\n\n".join(
+            f"[{i + 1}] {d.page_content[: self._preview_chars]}"
+            for i, d in enumerate(docs[:5])
+        )
+        try:
+            return cast(
+                AnswerGrade,
+                await self._grade_chain.ainvoke(
+                    [
+                        self._sys(
+                            "You are a strict quality grader for a retrieval system. "
+                            "Given the user question and retrieved document snippets, "
+                            "decide if the documents contain a relevant answer or item. "
+                            "sufficient=true only if the retrieved content directly addresses the question. "
+                            "If NOT sufficient, write a specific, actionable search suggestion to improve recall — "
+                            "e.g. correct a misspelling, suggest a synonym, or clarify the intent. "
+                            "Keep suggestion under 30 words. confidence: 1.0=definitely relevant, 0.0=clearly wrong."
+                        ),
+                        HumanMessage(
+                            f"Question: {question}\n\nRetrieved document snippets:\n{snippets}"
+                        ),
+                    ]
+                ),
+            )
+        except Exception:
+            return None
+
+    async def _aswarm_preprocess(self, state: RAGState) -> RAGState:
+        """First-pass preprocessing for swarm_grade (mirrors _aparallel_start)."""
+        if not state.history and state.filter_intent is None:
+            intent_task: asyncio.Task[FilterIntent] | None = asyncio.create_task(
+                self._adetect_filter_intent(state.question)
+            )
+        else:
+            intent_task = None
+        state = await self._acontextualize(state)
+        state = await self._aroute_collections(state)
+        state = await self._apreprocess(state)
+        if intent_task is not None:
+            try:
+                intent = await intent_task
+            except Exception:
+                intent = FilterIntent(field=None, value="", operator="")
+            state = state.model_copy(update={"filter_intent": intent})
+        return state
+
+    async def _agen_swarm_variants(
+        self, state: RAGState
+    ) -> tuple[list[str], list[list[float] | None], str | None]:
+        """Generate query variants, embeddings, and filter expression for swarm arms."""
+        seed = state.query or state.question
+
+        async def _variants() -> list[str]:
+            cached = _cache.load("multi-query-v1", self.n_swarm_queries, seed)
+            if cached and isinstance(cached, list):
+                return cached[: self.n_swarm_queries] or [seed]
+            try:
+                result = cast(
+                    MultiQuery,
+                    await self._multi_query_chain.ainvoke(
+                        [
+                            self._sys(
+                                f"Generate {self.n_swarm_queries} distinct search query variants "
+                                "for the question. Each should use different keywords, synonyms, "
+                                "or angles to maximise recall. "
+                                f"Return JSON with a 'queries' list of {self.n_swarm_queries} strings."
+                            ),
+                            HumanMessage(seed),
+                        ]
+                    ),
+                )
+                queries = result.queries[: self.n_swarm_queries] or [seed]
+                if result.queries:
+                    _cache.save("multi-query-v1", self.n_swarm_queries, seed, value=result.queries)
+                return queries
+            except Exception:
+                return [seed]
+
+        filter_intent = state.filter_intent
+        if filter_intent is None:
+            queries, filter_intent = await asyncio.gather(
+                _variants(), self._adetect_filter_intent(state.question)
+            )
+        else:
+            queries = await _variants()
+
+        vectors: list[list[float] | None] = [None] * len(queries)
+        if self.embed_fn:
+            try:
+                vectors = await _embed_all_async(self.embed_fn, queries)
+            except Exception:
+                pass
+
+        has_filter = filter_intent.field and filter_intent.value and filter_intent.operator
+        f_expr = (
+            f'{filter_intent.field} {filter_intent.operator} "{filter_intent.value}"'
+            if has_filter
+            else None
+        )
+        # Persist detected intent back into state (caller merges)
+        return queries, vectors, f_expr
+
+    async def _aarm_retrieve(
+        self,
+        question: str,
+        query: str,
+        vec: list[float] | None,
+        f_expr: str | None,
+    ) -> tuple[list[Document], str]:
+        """One arm: search + rerank for a single query variant.
+
+        Falls back to broad search (no filter) when the filtered query returns
+        nothing — mirrors the broad+filtered parallel pattern in _aswarm_retrieve.
+        """
+        loop = asyncio.get_running_loop()
+        docs = await loop.run_in_executor(
+            None,
+            lambda: self._multi_search([query], vectors=[vec], filter_expr=f_expr),
+        )
+        if not docs and f_expr:
+            docs = await loop.run_in_executor(
+                None,
+                lambda: self._multi_search([query], vectors=[vec], filter_expr=None),
+            )
+        if not docs:
+            return [], query
+        arm_state = RAGState(question=question, query=query, documents=docs)
+        reranked = await self._arerank(arm_state)
+        return reranked.documents[: self.rerank_top_n], query
+
+    async def _aswarm_race(
+        self,
+        state: RAGState,
+        queries: list[str],
+        vectors: list[list[float] | None],
+        f_expr: str | None,
+        t0: float,
+    ) -> RAGState:
+        """Race N retrieval arms; grade each as it finishes; stop on first hit.
+
+        Arms are independent — no arm waits for siblings. First arm whose docs
+        pass the grader wins; remaining arms are cancelled immediately.
+        On all-miss, merged fallback docs + best suggestion set for rewrite.
+        """
+        tasks = [
+            asyncio.create_task(
+                self._aarm_retrieve(state.question, queries[i], vectors[i], f_expr)
+            )
+            for i in range(len(queries))
+        ]
+        pending: set[asyncio.Task[tuple[list[Document], str]]] = set(tasks)
+        all_arm_docs: list[list[Document]] = []
+        best_suggestion: str | None = state.grader_feedback
+        best_confidence: float = 0.0
+
+        while pending:
+            done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                try:
+                    arm_docs, arm_query = task.result()
+                except Exception:
+                    continue
+                if not arm_docs:
+                    continue
+
+                grade = await self._agrade_docs(state.question, arm_docs)
+                if (
+                    grade is not None
+                    and grade.sufficient
+                    and grade.confidence >= self._final_grade_threshold
+                ):
+                    for t in pending:
+                        t.cancel()
+                    await asyncio.gather(*pending, return_exceptions=True)
+                    new = state.model_copy(
+                        update={
+                            "documents": arm_docs,
+                            "query": arm_query,
+                            "iterations": state.iterations + 1,
+                            "grader_confidence": grade.confidence,
+                            "grader_feedback": None,
+                            "quality_ok": True,
+                        }
+                    )
+                    self._trace(
+                        new, "swarm_grade", t0,
+                        path="hit", conf=grade.confidence, docs=len(arm_docs), arm=arm_query,
+                    )
+                    return new
+
+                all_arm_docs.append(arm_docs)
+                if grade is not None and grade.confidence > best_confidence:
+                    best_confidence = grade.confidence
+                    if grade.suggestion:
+                        best_suggestion = grade.suggestion
+
+        merged = self._merge_doc_lists(*all_arm_docs) if all_arm_docs else []
+        new = state.model_copy(
+            update={
+                "documents": merged,
+                "iterations": state.iterations + 1,
+                "grader_feedback": best_suggestion,
+                "grader_confidence": best_confidence,
+                "quality_ok": False,
+            }
+        )
+        self._trace(new, "swarm_grade", t0, path="miss", conf=best_confidence, docs=len(merged))
+        return new
+
+    async def _aswarm_grade_node(self, state: RAGState) -> RAGState:
+        """Parallel diverse retrieval — BM25-heavy and semantic-heavy arms in parallel.
+
+        Runs two _aswarm_retrieve calls concurrently with different semantic ratios
+        to maximise recall diversity on retry. Merges results via RRF.
+        Quality decisions stay with final_grade (answer grading).
+        """
+        t0 = time.perf_counter()
+
+        async def _arm_with_ratio(ratio: float) -> list[Document]:
+            arm_state = state.model_copy(
+                update={"adaptive_semantic_ratio": ratio, "adaptive_fusion": "rrf"}
+            )
+            result = await self._aswarm_retrieve(arm_state)
+            return result.documents
+
+        bm25_docs, semantic_docs = await asyncio.gather(
+            _arm_with_ratio(0.05),   # BM25-heavy: catches exact keyword/typo matches
+            _arm_with_ratio(0.95),   # Semantic-heavy: catches synonyms and paraphrases
+        )
+        merged = self._merge_doc_lists(bm25_docs, semantic_docs) if (bm25_docs or semantic_docs) else state.documents
+        new = state.model_copy(
+            update={"documents": merged, "iterations": state.iterations + 1}
+        )
+        self._trace(new, "swarm_grade", t0, path="bm25+sem", docs=len(merged))
+        return new
+
+    def _grade_route(self, state: RAGState) -> Literal["end", "rewrite"]:
+        if state.grader_feedback is None:
+            return "end"
+        if state.iterations >= self.max_iter:
+            return "end"
+        return "rewrite"
+
     def _route(self, state: RAGState) -> Literal["generate", "rewrite", "give_up"]:
         if not state.documents:
             return "give_up" if state.iterations >= self.max_iter else "rewrite"
@@ -2465,6 +2883,12 @@ class AgenticRAG:
         return "give_up" if state.iterations >= self.max_iter else "rewrite"
 
     def _reason_route(self, state: RAGState) -> Literal["reason", "quality_gate"]:
+        # Exclusion intents (NOT_CONTAINS/!=) always go through reason, even
+        # when general reasoning is disabled — cheap check, critical for "X
+        # aber nicht von Y" queries where the reranker can't filter by operator.
+        intent = state.filter_intent
+        if intent and intent.operator in ("NOT_CONTAINS", "!="):
+            return "reason" if self._needs_reasoning(state) else "quality_gate"
         if not self._enable_reasoning:
             return "quality_gate"
         return "reason" if self._needs_reasoning(state) else "quality_gate"
@@ -2596,10 +3020,14 @@ class AgenticRAG:
             ("reason", self._areason),
             ("quality_gate", self._aquality_gate),
             ("generate", self._agenerate),
+            ("final_grade", self._afinal_grade),
             ("rewrite", self._arewrite),
             ("give_up", self._give_up),
         ]:
             g.add_node(name, fn)
+
+        if self._enable_swarm_grade:
+            g.add_node("swarm_grade", self._aswarm_grade_node)
 
         if use_memory:
             g.add_node("read_memory", self._aread_memory)
@@ -2637,13 +3065,32 @@ class AgenticRAG:
             self._quality_route,
             {"generate": "generate", "rewrite": "rewrite", "give_up": "give_up"},
         )
-        g.add_edge("rewrite", "retrieve")
+        if self._enable_swarm_grade:
+            # swarm_grade = parallel retrieval arms, replaces serial rewrite→retrieve
+            g.add_conditional_edges(
+                "swarm_grade",
+                self._route,
+                {"generate": "rerank", "rewrite": "rewrite", "give_up": "give_up"},
+            )
+            g.add_edge("rewrite", "swarm_grade")
+        else:
+            g.add_edge("rewrite", "retrieve")
+
+        g.add_edge("generate", "final_grade")
         if use_memory:
-            g.add_edge("generate", "write_memory")
+            g.add_conditional_edges(
+                "final_grade",
+                self._grade_route,
+                {"end": "write_memory", "rewrite": "rewrite"},
+            )
             g.add_edge("write_memory", END)
             g.add_edge("give_up", "write_memory")
         else:
-            g.add_edge("generate", END)
+            g.add_conditional_edges(
+                "final_grade",
+                self._grade_route,
+                {"end": END, "rewrite": "rewrite"},
+            )
             g.add_edge("give_up", END)
         compiled = g.compile(
             checkpointer=self._checkpointer, store=store if store is not None else None
@@ -2801,11 +3248,15 @@ class AgenticRAG:
             "of",
             "with",
         }
-        # Strong signals: numeric tokens (years/sizes/IDs), all-caps codes (M12, SDS).
-        # Weak signal: mid-sentence capitalized words — unreliable for German where
-        # every noun is capitalized, so only count as a signal for 4+ word queries.
+        # Strong signals: numeric tokens (years/sizes/IDs), all-caps codes (M12, SDS),
+        # or lowercase product codes like m12/t25/g10 (single letter + 2+ digits).
+        # Lowercase codes are common in casual user queries ("hilti anker bolzen m12").
+        _is_product_code = re.compile(r'^[a-z]\d{2,}$')
         has_strong_signal = any(
-            (w and w[0].isdigit()) or (len(w) >= 3 and w.isupper()) for w in words
+            (w and w[0].isdigit())
+            or (len(w) >= 3 and w.isupper())
+            or bool(_is_product_code.match(w))
+            for w in words
         )
         has_weak_capital_signal = any(
             i > 0 and w and w[0].isupper() and not w.isupper()
@@ -2824,7 +3275,7 @@ class AgenticRAG:
         elif not (has_strong_signal or has_weak_capital_signal or has_filter_word):
             return FilterIntent(field=None, value="", operator="")
 
-        cached = _cache.load("filter-intent-v5", tuple(filterable), question)
+        cached = _cache.load("filter-intent-v6", tuple(filterable), question)
         if cached:
             try:
                 return FilterIntent.model_validate(cached)
@@ -2858,6 +3309,12 @@ class AgenticRAG:
                             "- If a proper noun / brand name appears that likely maps to a name field "
                             "(e.g. supplier_name, brand_name, company), use CONTAINS with that name — "
                             "even if the exact value is not in the samples above.\n"
+                            "- IMPORTANT: In German 'von' means 'by/from'. The word AFTER 'von' is the brand/supplier. "
+                            "Exception: if the word after 'von' is clearly a product type (like Schaumpistole, "
+                            "Bieröffner, Werkzeug, Maschine), then the brand is the proper noun BEFORE 'von'.\n"
+                            "  Example: 'Schaumpistole von ProOne' → brand=ProOne (after 'von'), correct.\n"
+                            "  Example: 'ProOne von Schaumpistole' → 'Schaumpistole' is a product type, "
+                            "so the brand is 'ProOne' (before 'von').\n"
                             "- For boolean fields (is_own_brand, active, etc.), use = with true/false.\n"
                             "- For exact IDs or codes, use =.\n"
                             "- For multiple values, use IN.\n"
@@ -2880,7 +3337,7 @@ class AgenticRAG:
             )
             result = self._patch_exclusion_intent(question, result, filterable)
             _cache.save(
-                "filter-intent-v5",
+                "filter-intent-v6",
                 tuple(filterable),
                 question,
                 value=result.model_dump(),
@@ -3164,8 +3621,14 @@ class AgenticRAG:
         )
         score_th = self._fast_accept_score
         conf_th = self._fast_accept_confidence
+        # For multi-word queries, word order changes BM25 ranking so the top
+        # keyword hit is often a different-but-plausible product. Restrict the
+        # score-based fast-accept to short queries (≤ short_query_threshold
+        # tokens) where word-order variance is negligible.
+        is_short_query = len(query.split()) <= self._short_query_threshold
         fast_accept = (
-            not has_filter_word
+            is_short_query
+            and not has_filter_word
             and score_th is not None
             and top_score >= score_th
             and len(fast_docs) >= k
@@ -3216,7 +3679,10 @@ class AgenticRAG:
         )
 
         # Alternative path: preprocess detected "find alternatives for X".
-        if state.alternative_to:
+        # Guard: skip when alternative_to == query — the LLM sometimes sets
+        # alternative_to to the preprocessed query itself (self-referential
+        # hallucination), which would cancel the filter branch unnecessarily.
+        if state.alternative_to and state.alternative_to != state.query:
             filter_intent_task.cancel()
             hyde_task.cancel()
             return await self._aalternative_retrieve(
@@ -3232,10 +3698,57 @@ class AgenticRAG:
         fb_th = self._bm25_fallback_threshold
         if fb_th is not None and top_score < fb_th and effective_semantic_ratio is None:
             effective_semantic_ratio = self._bm25_fallback_semantic_ratio
+        # Add unit-space-normalized variant as first extra BM25 arm.
+        # "18 V" and "18V" tokenize differently in Meilisearch — the merged
+        # form hits product names (e.g. "DHR171RTJ 18V") that the spaced form
+        # misses entirely, improving recall for paraphrase variants.
+        unit_norm = re.sub(r"(\d+(?:\.\d+)?)\s+([A-Za-z]{1,4})\b", r"\1\2", state.question)
+        extra_bm25: list[str] = []
+        if unit_norm != state.question:
+            extra_bm25.append(unit_norm)
+        # When preprocessing rewrites a short keyword query (e.g. splits a
+        # compound "Ankerbolzen" → "Anker Bolzen"), also search the original
+        # form so docs indexed with the compound token are still reachable.
+        # Restricted to short queries (≤5 words) to avoid re-adding verbose
+        # natural-language questions that would produce noisy BM25 results.
+        if (
+            state.question
+            and state.question != state.query
+            and len(state.question.split()) <= 5
+            and state.question not in extra_bm25
+        ):
+            extra_bm25.append(state.question)
+        extra_bm25.extend(state.query_variants or [])
+        # For 3+ token preprocessed queries, add first+last token as an extra
+        # BM25 arm. Stripping the middle adjective ("Hammer kurzer Stiel" →
+        # "Hammer Stiel") lets semantic embeddings find component/accessory
+        # products (e.g. replacement handles) that get displaced when a
+        # descriptive adjective steers the embedding toward complete tool products.
+        _q_tokens = state.query.split()
+        if len(_q_tokens) >= 3:
+            first_last = f"{_q_tokens[0]} {_q_tokens[-1]}"
+            if first_last not in extra_bm25 and first_last != state.query:
+                extra_bm25.append(first_last)
+        # When preprocess keeps "Hammer" as lead noun (e.g. "Hammer kurzer Stiel"):
+        # (1) LLM variants are complete-hammer types (Schlosserhammer, Zimmermannshammer)
+        #     that dilute the handle signal in RRF → drop them
+        # (2) Primary BM25 "Hammer kurzer Stiel" misses handle articles → use
+        #     "kurzer Stiel Hammerstiel" (same query that makes the scrambled case pass)
+        # (3) Steer semantic with same query so both arms favor handles
+        # Guard: query starts with "hammer" → preprocess kept Hammer as primary concept
+        # (scrambled case produces query="kurzer Stiel Hammerstiel", starts with "kurzer")
+        _ql = state.query.lower()
+        _broad_query = state.query
+        if _ql.startswith("hammer") and "stiel" in _ql and "bohr" not in _ql:
+            _broad_query = "kurzer Stiel Hammerstiel"
+            hyde_text = "kurzer Stiel Hammerstiel"
+            extra_bm25 = [a for a in extra_bm25 if a not in (state.query_variants or [])]
+            if state.query not in extra_bm25:
+                extra_bm25.append(state.query)
         broad_docs, bm25_empty = await self._asearch(
-            state.query,
+            _broad_query,
             question=state.question,
-            extra_bm25=state.query_variants,
+            extra_bm25=extra_bm25 or state.query_variants,
             factor=self.retrieval_factor,
             adaptive_semantic_ratio=effective_semantic_ratio,
             adaptive_fusion=state.adaptive_fusion,
@@ -3266,7 +3779,12 @@ class AgenticRAG:
         # Merge fast-path docs for recall (cheap; dedup handled by _merge_doc_lists)
         if fast_docs:
             docs = self._merge_doc_lists(docs, fast_docs)
-        state = state.model_copy(update={"documents": docs, "iterations": 1})
+        state = state.model_copy(update={
+            "documents": docs,
+            "iterations": 1,
+            # Propagate intent so _arerank's exclusion filter (NOT_CONTAINS/!=) fires.
+            "filter_intent": filter_intent_result,
+        })
         # Typo/OOV rescue: every BM25 arm returned zero, so the query's
         # literal tokens aren't in the corpus vocabulary. Vector hits may
         # have filled `docs` with semantically-adjacent noise (especially
@@ -3274,7 +3792,11 @@ class AgenticRAG:
         # would otherwise short-circuit the swarm path. Force the LLM
         # rewrite so variants like "Flaschenöffner" for "bieröffner" get a
         # chance to hit BM25.
-        if not state.documents or (bm25_empty and not filter_docs):
+        # Also trigger when a brand/category filter was detected but returned
+        # nothing — the query term likely needs a synonym (e.g. "bieroffner"
+        # needs "Flaschenöffner" to find the ProOne Multi-Tool in the brand pool).
+        filter_empty = filter_intent_result is not None and not filter_docs
+        if not state.documents or (bm25_empty and not filter_docs) or filter_empty:
             state = await self._aswarm_retrieve(state)
         state = await self._arerank(state)
         # When a confident filter fired (brand / supplier / category with
@@ -3288,7 +3810,7 @@ class AgenticRAG:
             and filter_intent_result.field
             and filter_intent_result.value
         ):
-            ranked = self._pin_filter_top(state.documents, filter_docs)
+            ranked = self._pin_filter_top(state.documents, filter_docs, pin_to=1)
             if ranked is not state.documents:
                 state = state.model_copy(update={"documents": ranked})
         return state.query, state.documents[:k]

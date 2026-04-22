@@ -17,14 +17,21 @@ from pathlib import Path
 from typing import Any
 
 HIT_CASE = tuple[str, list[str], str]
+# (query, excluded_content_terms, id_field) — passes when no top-5 doc contains any excluded term
+EXCLUSION_CASE = tuple[str, list[str], str]
 
 _DATA_DIR = Path(__file__).parent
+
+
+async def _retrieve_docs(rag: Any, query: str, k: int = 5) -> list[Any]:
+    _, docs = await rag._aretrieve_documents(query, top_k=k)
+    return docs
 
 
 async def _retrieve_ids(
     rag: Any, query: str, id_field: str, k: int = 5
 ) -> list[str]:
-    _, docs = await rag._aretrieve_documents(query, top_k=k)
+    docs = await _retrieve_docs(rag, query, k)
     return [str(d.metadata.get(id_field, "")) for d in docs]
 
 
@@ -91,6 +98,41 @@ async def run_consistency(
     print(f"[{label}] consistency={avg:.4f}  stable_top1={stable_rate:.4f}  "
           f"groups={total}", flush=True)
     return avg, stable_rate, total
+
+
+async def run_exclusion_hits(
+    rag: Any,
+    cases: Sequence[EXCLUSION_CASE],
+    sem: asyncio.Semaphore,
+    label: str = "exclusion",
+) -> tuple[int, int]:
+    """Negative test: passes when NONE of the top-5 docs contain any excluded term.
+
+    Each case is (query, [excluded_terms], id_field). A term is matched
+    case-insensitively against each doc's page_content and all metadata values.
+    """
+    total = len(cases)
+
+    def _doc_contains(doc: Any, terms: list[str]) -> bool:
+        # Check page_content only — metadata fields like article_search_term
+        # contain competitor cross-reference codes (e.g. "fixit516") on
+        # non-Fixit products, which would cause false positives.
+        content = (doc.page_content or "").lower()
+        return any(t.lower() in content for t in terms)
+
+    async def _one(case: EXCLUSION_CASE) -> bool:
+        query, excluded_terms, _id_field = case
+        async with sem:
+            docs = await _retrieve_docs(rag, query)
+        return not any(_doc_contains(d, excluded_terms) for d in docs)
+
+    passes = sum(await asyncio.gather(*(_one(c) for c in cases)))
+    print(
+        f"[{label}] exclusion pass = {passes}/{total} = {passes / total:.4f}"
+        if total else f"[{label}] no cases",
+        flush=True,
+    )
+    return passes, total
 
 
 def load_json_cases(path: Path) -> list[dict[str, Any]]:

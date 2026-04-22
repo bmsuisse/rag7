@@ -84,6 +84,9 @@ class RAGConfig(BaseModel):
     enable_reasoning: bool = True
     enable_quality_gate: bool = True
     enable_preprocess_llm: bool = True
+    enable_final_grade: bool = False
+    final_grade_threshold: float = Field(default=0.9, ge=0.0, le=1.0)
+    enable_swarm_grade: bool = False
 
     # ── Timeouts (seconds) ───────────────────────────────────────────────────
     rerank_timeout_s: float = Field(default=30.0, ge=1.0, le=300.0)
@@ -113,6 +116,7 @@ class RAGConfig(BaseModel):
     strong_model: str | None = None
     weak_model: str | None = None
     thinking_model: str | None = None
+    grader_model: str | None = None
 
     @classmethod
     def from_env(cls) -> Self:
@@ -170,6 +174,9 @@ class RAGConfig(BaseModel):
             enable_preprocess_llm=bool(
                 int(os.getenv("RAG_ENABLE_PREPROCESS_LLM", "1"))
             ),
+            enable_final_grade=bool(int(os.getenv("RAG_ENABLE_FINAL_GRADE", "0"))),
+            final_grade_threshold=float(os.getenv("RAG_FINAL_GRADE_THRESHOLD", "0.9")),
+            enable_swarm_grade=bool(int(os.getenv("RAG_ENABLE_SWARM_GRADE", "0"))),
             rerank_timeout_s=float(os.getenv("RAG_RERANK_TIMEOUT_S", "30.0")),
             llm_timeout_s=float(os.getenv("RAG_LLM_TIMEOUT_S", "60.0")),
             max_iter=int(os.getenv("RAG_MAX_ITER", "3")),
@@ -178,6 +185,7 @@ class RAGConfig(BaseModel):
             strong_model=os.getenv("RAG_STRONG_MODEL") or None,
             weak_model=os.getenv("RAG_WEAK_MODEL") or None,
             thinking_model=os.getenv("RAG_THINKING_MODEL") or None,
+            grader_model=os.getenv("RAG_GRADER_MODEL") or None,
         )
 
     @classmethod

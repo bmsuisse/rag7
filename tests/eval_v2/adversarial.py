@@ -11,6 +11,7 @@ robust to the perturbation.
 
 from __future__ import annotations
 
+import hashlib
 import random
 import re
 from typing import Callable
@@ -37,7 +38,8 @@ def _drop_char(word: str, rng: random.Random) -> str:
 
 def typo_variants(query: str, n: int = 3, seed: int = 0) -> list[str]:
     """Return `n` typo variants: umlaut stripped, adjacent swap, single drop."""
-    rng = random.Random(hash((query, seed)) & 0xFFFFFFFF)
+    h = hashlib.sha256(f"{query}\x00{seed}".encode()).digest()
+    rng = random.Random(int.from_bytes(h[:4], "big"))
     words = query.split()
     if not words:
         return []

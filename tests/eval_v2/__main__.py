@@ -14,8 +14,10 @@ from typing import Any
 
 from tests.eval_v2.adversarial import HIT_CASE, build_adversarial_cases
 from tests.eval_v2.runner import (
+    EXCLUSION_CASE,
     paraphrase_groups,
     run_consistency,
+    run_exclusion_hits,
     run_hits,
     synthetic_cases,
 )
@@ -120,6 +122,20 @@ SUITES: list[tuple[str, str, list[HIT_CASE]]] = [
     ("article", "Article Catalog", ARTICLE_HITS),
     ("supplier_catalogs_de", "Supplier Catalogs DE", SUPPLIER_CATALOGS_DE_HITS),
 ]
+
+# Negative tests: query must NOT surface results containing the excluded terms.
+# Each entry: (index_name, label, exclusion_cases)
+ONETRADE_DE_EXCLUSIONS: list[EXCLUSION_CASE] = [
+    # User wants trockenbeton but explicitly excludes Fixit brand.
+    # Tests negation filter-intent detection + reasoning node exclusion path.
+    ("trockenbeton aber nicht von fixit", ["fixit"], "article_id"),
+    # Same intent phrased differently.
+    ("Trockenbeton ohne Fixit", ["fixit"], "article_id"),
+]
+
+EXCLUSION_SUITES: list[tuple[str, str, list[EXCLUSION_CASE]]] = [
+    ("onetrade_articles_de", "OneTrade DE Articles", ONETRADE_DE_EXCLUSIONS),
+]
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -159,6 +175,8 @@ async def main() -> None:
     consistency_sum = 0.0
     consistency_groups = 0
     stable_sum = 0.0
+    excl_passes = 0
+    excl_total = 0
 
     for index, label, base in SUITES:
         rag = await _build_rag(index)
@@ -186,11 +204,19 @@ async def main() -> None:
             grand_hits += h
             grand_total += t
 
+    for index, label, excl_cases in EXCLUSION_SUITES:
+        rag = await _build_rag(index)
+        print(f"\n══ {label}: negative exclusion ({len(excl_cases)} cases) ══")
+        p, t = await run_exclusion_hits(rag, excl_cases, sem, label=f"{label}/excl")
+        excl_passes += p
+        excl_total += t
+
     elapsed = time.perf_counter() - t0
     avg_consistency = (
         consistency_sum / consistency_groups if consistency_groups else 0.0
     )
     avg_stable = stable_sum / consistency_groups if consistency_groups else 0.0
+    excl_rate = excl_passes / excl_total if excl_total else 0.0
 
     avg_query_latency_ms = elapsed / grand_total * 1000 if grand_total else 0.0
     print("\n════════════════════════════════════════════════════════════")
@@ -202,6 +228,8 @@ async def main() -> None:
         )
     print(f"  paraphrase consistency:      {avg_consistency:.4f}")
     print(f"  paraphrase stable_top1:      {avg_stable:.4f}")
+    if excl_total:
+        print(f"  negative exclusion pass:     {excl_passes}/{excl_total} = {excl_rate:.4f}")
     print(f"  avg query latency:           {avg_query_latency_ms:.0f}ms")
     print("════════════════════════════════════════════════════════════")
 
