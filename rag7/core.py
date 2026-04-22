@@ -1057,6 +1057,8 @@ class AgenticRAG:
         if auto_strategy:
             self._auto_configure(override_hyde_min_words=hyde_min_words is None)
 
+        self._index_config = self.backend.get_index_config()
+
         _ck = self._chain_llm  # applies prompt_cache_key for non-Azure OpenAI
         self._search_query_chain = _ck(self._llm, "rewrite").with_structured_output(
             SearchQuery, method="json_schema"
@@ -3198,7 +3200,7 @@ class AgenticRAG:
     async def _adetect_filter_intent(self, question: str) -> FilterIntent:
         if not self._enable_filter_intent:
             return FilterIntent(field=None, value="", operator="")
-        config = self.backend.get_index_config()
+        config = self._index_config
         filterable = config.filterable_attributes
         if not filterable:
             return FilterIntent(field=None, value="", operator="")
