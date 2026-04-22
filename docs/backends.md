@@ -1,6 +1,6 @@
 # Backends
 
-rag7 supports 8 backends. Swap with a single string alias in `init_agent`, or pass a backend instance directly to `Agent`.
+rag7 supports 10 backends. Swap with a single string alias in `init_agent`, or pass a backend instance directly to `Agent`.
 
 ## Backend aliases
 
@@ -13,6 +13,8 @@ rag7 supports 8 backends. Swap with a single string alias in `init_agent`, or pa
 | `"lancedb"` / `"lance"` | `LanceDBBackend` | `rag7[lancedb]` |
 | `"qdrant"` | `QdrantBackend` | `rag7[qdrant]` |
 | `"pgvector"` / `"pg"` | `PgvectorBackend` | `rag7[pgvector]` |
+| `"postgres_fts"` / `"pg_fts"` | `PostgresFTSBackend` | `psycopg` |
+| `"sqlite"` / `"sqlite_fts"` | `SQLiteFTSBackend` | _(built-in)_ |
 | `"duckdb"` | `DuckDBBackend` | `rag7[duckdb]` |
 
 ---
@@ -200,6 +202,38 @@ backend = DuckDBBackend(
     table="docs",
     db_path="./mydb.duckdb",
     embed_fn=my_embed_fn,
+)
+```
+
+---
+
+## PostgreSQL FTS (without pgvector)
+
+Pure PostgreSQL full-text + SQL filters, no vector extension required.
+
+```python
+from rag7.backend import PostgresFTSBackend
+
+backend = PostgresFTSBackend(
+    table="documents",
+    dsn="postgresql://user:pass@localhost/mydb",
+    content_column="content",
+)
+```
+
+---
+
+## SQLite FTS
+
+SQLite with FTS5 when available, falling back to `LIKE` search otherwise.
+
+```python
+from rag7.backend import SQLiteFTSBackend
+
+backend = SQLiteFTSBackend(
+    table="docs",
+    db_path="./docs.sqlite3",
+    content_column="content",
 )
 ```
 

@@ -23,6 +23,10 @@ _BACKEND_ALIASES: dict[str, str] = {
     "pgvector": "PgvectorBackend",
     "postgres": "PgvectorBackend",
     "pg": "PgvectorBackend",
+    "postgres_fts": "PostgresFTSBackend",
+    "pg_fts": "PostgresFTSBackend",
+    "sqlite": "SQLiteFTSBackend",
+    "sqlite_fts": "SQLiteFTSBackend",
     "meilisearch": "MeilisearchBackend",
     "meili": "MeilisearchBackend",
     "azure": "AzureAISearchBackend",
@@ -82,6 +86,8 @@ def _build_backend(
         "QdrantBackend",
         "DuckDBBackend",
         "PgvectorBackend",
+        "PostgresFTSBackend",
+        "SQLiteFTSBackend",
         "AzureAISearchBackend",
     }
     if cls_name in _takes_index:

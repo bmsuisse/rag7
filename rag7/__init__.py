@@ -18,9 +18,11 @@ from .backend import (  # noqa: E402
     LanceDBBackend,
     MeilisearchBackend,
     PgvectorBackend,
+    PostgresFTSBackend,
     QdrantBackend,
     SearchBackend,
     SearchRequest,
+    SQLiteFTSBackend,
 )
 from .config import RAGConfig  # noqa: E402
 from .core import AgenticRAG  # noqa: E402
@@ -68,12 +70,14 @@ __all__ = [
     "LanceDBBackend",
     "MeilisearchBackend",
     "PgvectorBackend",
+    "PostgresFTSBackend",
     "QdrantBackend",
     "RAGState",
     "Reranker",
     "RerankResult",
     "SearchBackend",
     "SearchRequest",
+    "SQLiteFTSBackend",
     "_dbsf_fuse",
     "_make_azure_embed_fn",
     "_rrf_fuse",

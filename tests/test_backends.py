@@ -446,6 +446,63 @@ class TestDuckDBBackend:
         )
 
 
+# ── SQLite FTS ───────────────────────────────────────────────────────────────
+
+
+class TestSQLiteFTSBackend:
+    @pytest.fixture
+    def backend(self, tmp_path):
+        from rag7.backend import SQLiteFTSBackend
+
+        db_path = str(tmp_path / "docs.sqlite3")
+        b = SQLiteFTSBackend(
+            table="test_sqlite",
+            db_path=db_path,
+            content_column="content",
+        )
+        b._conn.execute(
+            """
+            CREATE TABLE test_sqlite (
+                id TEXT PRIMARY KEY,
+                content TEXT,
+                category TEXT
+            )
+            """
+        )
+        b._conn.execute("CREATE VIRTUAL TABLE test_sqlite_fts USING fts5(content)")
+        for d in SAMPLE_DOCS:
+            b._conn.execute(
+                "INSERT INTO test_sqlite (id, content, category) VALUES (?, ?, ?)",
+                [d["id"], d["content"], d["category"]],
+            )
+            b._conn.execute(
+                "INSERT INTO test_sqlite_fts (rowid, content) VALUES (?, ?)",
+                [int(d["id"]), d["content"]],
+            )
+        b._conn.commit()
+        return b
+
+    def test_search(self, backend):
+        req = SearchRequest(query="programming", limit=3)
+        hits = backend.search(req)
+        assert len(hits) > 0
+        assert "content" in hits[0]
+
+    def test_search_with_filter(self, backend):
+        req = SearchRequest(
+            query="programming",
+            limit=10,
+            filter_expr="category = 'tech'",
+        )
+        hits = backend.search(req)
+        assert len(hits) > 0
+        assert all(h.get("category") == "tech" for h in hits)
+
+    def test_sample_documents(self, backend):
+        docs = backend.sample_documents(limit=2)
+        assert len(docs) == 2
+
+
 # ── pgvector ─────────────────────────────────────────────────────────────────
 
 PGVECTOR_DSN = "postgresql://test:test@localhost:5433/testdb"
@@ -460,6 +517,61 @@ def _pgvector_available() -> bool:
         return True
     except Exception:
         return False
+
+
+@pytest.mark.skipif(
+    not _pgvector_available(),
+    reason="postgres container not running (podman compose -f docker-compose.test.yml up -d)",
+)
+class TestPostgresFTSBackend:
+    @pytest.fixture(autouse=True)
+    def backend(self):
+        import psycopg
+        from rag7.backend import PostgresFTSBackend
+
+        conn = psycopg.connect(PGVECTOR_DSN, autocommit=True)
+        conn.execute("DROP TABLE IF EXISTS test_pgfts")
+        conn.execute(
+            """
+            CREATE TABLE test_pgfts (
+                id VARCHAR PRIMARY KEY,
+                content TEXT,
+                category VARCHAR
+            )
+            """
+        )
+        for d in SAMPLE_DOCS:
+            conn.execute(
+                "INSERT INTO test_pgfts (id, content, category) VALUES (%s, %s, %s)",
+                (d["id"], d["content"], d["category"]),
+            )
+        conn.close()
+
+        self.backend = PostgresFTSBackend(
+            table="test_pgfts",
+            dsn=PGVECTOR_DSN,
+            content_column="content",
+        )
+        yield
+        try:
+            self.backend._conn.execute("DROP TABLE IF EXISTS test_pgfts")
+        except Exception:
+            pass
+
+    def test_search(self):
+        req = SearchRequest(query="programming", limit=3)
+        hits = self.backend.search(req)
+        assert len(hits) > 0
+
+    def test_search_with_filter(self):
+        req = SearchRequest(query="cat", limit=5, filter_expr="category = 'animals'")
+        hits = self.backend.search(req)
+        assert len(hits) > 0
+        assert all(h.get("category") == "animals" for h in hits)
+
+    def test_sample_documents(self):
+        docs = self.backend.sample_documents(limit=3)
+        assert len(docs) == 3
 
 
 @pytest.mark.skipif(

@@ -826,6 +826,124 @@ class PgvectorBackend(SearchBackend):
         return _distance_rows_to_hits(cols, rows, self._vector_col)
 
 
+class PostgresFTSBackend(SearchBackend):
+    """PostgreSQL full-text backend without pgvector."""
+
+    def build_filter_expr(self, intent: Any) -> str:
+        return _build_sql_filter(intent)
+
+    def __init__(
+        self,
+        table: str,
+        dsn: str | None = None,
+        content_column: str = "content",
+    ):
+        import psycopg
+
+        self._dsn = dsn or os.getenv(
+            "DATABASE_URL", "postgresql://localhost:5432/postgres"
+        )
+        self._conn = psycopg.connect(self._dsn, autocommit=True)
+        self._table = table
+        self._content_col = content_column
+        self.index = table
+
+    def search(self, request: SearchRequest) -> list[dict]:
+        safe_filter = _validate_filter_expr(request.filter_expr)
+        where = f"WHERE {safe_filter}" if safe_filter else ""
+        if request.query:
+            fts_where = (
+                f"{'AND' if where else 'WHERE'} "
+                f"to_tsvector({self._content_col}) @@ plainto_tsquery(%s)"
+            )
+            rank_expr = (
+                f"ts_rank_cd(to_tsvector({self._content_col}), plainto_tsquery(%s))"
+            )
+            sql = f"""
+                SELECT *, {rank_expr} AS _rank
+                FROM {self._table}
+                {where} {fts_where}
+                ORDER BY _rank DESC
+                LIMIT %s
+            """
+            params: list[Any] = [request.query, request.query, request.limit]
+        else:
+            sql = f"""
+                SELECT * FROM {self._table}
+                {where}
+                LIMIT %s
+            """
+            params = [request.limit]
+        try:
+            with self._conn.cursor() as cur:
+                cur.execute(sql, params)  # type: ignore[arg-type]
+                cols = [desc[0] for desc in cur.description or []]
+                rows = cur.fetchall()
+                return self._rows_to_hits(cols, rows)
+        except Exception:
+            return []
+
+    def get_index_config(self) -> IndexConfig:
+        try:
+            with self._conn.cursor() as cur:
+                cur.execute(
+                    "SELECT column_name FROM information_schema.columns WHERE table_name = %s",
+                    (self._table,),
+                )
+                cols = [row[0] for row in cur.fetchall()]
+                return IndexConfig(
+                    filterable_attributes=cols,
+                    searchable_attributes=[self._content_col]
+                    if self._content_col in cols
+                    else cols,
+                )
+        except Exception:
+            return IndexConfig()
+
+    def sample_documents(
+        self,
+        limit: int = 20,
+        filter_expr: str | None = None,
+        attributes_to_retrieve: list[str] | None = None,
+    ) -> list[dict]:
+        if attributes_to_retrieve:
+            _validate_identifiers(attributes_to_retrieve)
+            cols = ", ".join(attributes_to_retrieve)
+        else:
+            cols = "*"
+        safe_filter = _validate_filter_expr(filter_expr)
+        where = f"WHERE {safe_filter}" if safe_filter else ""
+        sql = f"SELECT {cols} FROM {self._table} {where} LIMIT %s"
+        try:
+            with self._conn.cursor() as cur:
+                cur.execute(sql, (limit,))  # type: ignore[arg-type]
+                col_names = [desc[0] for desc in cur.description or []]
+                rows = cur.fetchall()
+                return [dict(zip(col_names, row)) for row in rows]
+        except Exception:
+            return []
+
+    @staticmethod
+    def _rank_to_score(rank: Any) -> float:
+        try:
+            value = float(rank)
+            if value <= 0:
+                return 0.0
+            return value
+        except Exception:
+            return 0.0
+
+    def _rows_to_hits(self, cols: list[str], rows: list[Any]) -> list[dict]:
+        hits: list[dict] = []
+        for row in rows:
+            hit = dict(zip(cols, row))
+            rank = hit.pop("_rank", None)
+            if rank is not None:
+                hit["_rankingScore"] = self._rank_to_score(rank)
+            hits.append(hit)
+        return hits
+
+
 class QdrantBackend(SearchBackend):
     """Qdrant backend. Requires `pip install qdrant-client`."""
 
@@ -1075,6 +1193,137 @@ class DuckDBBackend(SearchBackend):
 
     def _rows_to_hits(self, cols: list[str], rows: list[Any]) -> list[dict]:
         return _distance_rows_to_hits(cols, rows, self._vector_col)
+
+
+class SQLiteFTSBackend(SearchBackend):
+    """SQLite backend with FTS5 when available, LIKE fallback otherwise."""
+
+    def build_filter_expr(self, intent: Any) -> str:
+        return _build_sql_filter(intent)
+
+    def __init__(
+        self,
+        table: str,
+        db_path: str = ":memory:",
+        content_column: str = "content",
+    ):
+        import sqlite3
+
+        self._conn = sqlite3.connect(db_path)
+        self._conn.row_factory = sqlite3.Row
+        self._table = table
+        self._content_col = content_column
+        self._fts_table = f"{table}_fts"
+        self.index = table
+
+    def search(self, request: SearchRequest) -> list[dict]:
+        hits = self._search_fts(request)
+        if hits:
+            return hits
+        return self._search_like(request)
+
+    def _search_fts(self, request: SearchRequest) -> list[dict]:
+        safe_filter = _validate_filter_expr(request.filter_expr)
+        where_parts: list[str] = []
+        params: list[Any] = []
+        if request.query:
+            where_parts.append("f MATCH ?")
+            params.append(request.query)
+        if safe_filter:
+            where_parts.append(f"({safe_filter})")
+        where = ("WHERE " + " AND ".join(where_parts)) if where_parts else ""
+        sql = f"""
+            SELECT t.*, bm25(f) AS _bm25
+            FROM {self._table} t
+            JOIN {self._fts_table} f ON f.rowid = t.rowid
+            {where}
+            ORDER BY _bm25
+            LIMIT ?
+        """
+        params.append(request.limit)
+        try:
+            cur = self._conn.execute(sql, params)
+            rows = cur.fetchall()
+            return self._rows_to_hits(rows)
+        except Exception:
+            return []
+
+    def _search_like(self, request: SearchRequest) -> list[dict]:
+        safe_filter = _validate_filter_expr(request.filter_expr)
+        where_parts: list[str] = []
+        params: list[Any] = []
+        if request.query:
+            where_parts.append(f"{self._content_col} LIKE ?")
+            params.append(f"%{request.query}%")
+        if safe_filter:
+            where_parts.append(f"({safe_filter})")
+        where = ("WHERE " + " AND ".join(where_parts)) if where_parts else ""
+        sql = f"""
+            SELECT *
+            FROM {self._table}
+            {where}
+            LIMIT ?
+        """
+        params.append(request.limit)
+        try:
+            cur = self._conn.execute(sql, params)
+            rows = cur.fetchall()
+            return [dict(r) for r in rows]
+        except Exception:
+            return []
+
+    def get_index_config(self) -> IndexConfig:
+        try:
+            cur = self._conn.execute(f"PRAGMA table_info({self._table})")
+            cols = [str(row[1]) for row in cur.fetchall()]
+            return IndexConfig(
+                filterable_attributes=cols,
+                searchable_attributes=[self._content_col]
+                if self._content_col in cols
+                else cols,
+            )
+        except Exception:
+            return IndexConfig()
+
+    def sample_documents(
+        self,
+        limit: int = 20,
+        filter_expr: str | None = None,
+        attributes_to_retrieve: list[str] | None = None,
+    ) -> list[dict]:
+        if attributes_to_retrieve:
+            _validate_identifiers(attributes_to_retrieve)
+            cols = ", ".join(attributes_to_retrieve)
+        else:
+            cols = "*"
+        safe_filter = _validate_filter_expr(filter_expr)
+        where = f"WHERE {safe_filter}" if safe_filter else ""
+        sql = f"SELECT {cols} FROM {self._table} {where} LIMIT ?"
+        try:
+            cur = self._conn.execute(sql, [limit])
+            return [dict(r) for r in cur.fetchall()]
+        except Exception:
+            return []
+
+    @staticmethod
+    def _bm25_to_score(raw: Any) -> float:
+        try:
+            value = float(raw)
+            if value < 0:
+                return 1.0 + abs(value)
+            return 1.0 / (1.0 + value)
+        except Exception:
+            return 0.0
+
+    def _rows_to_hits(self, rows: list[Any]) -> list[dict]:
+        hits: list[dict] = []
+        for row in rows:
+            hit = dict(row)
+            bm25 = hit.pop("_bm25", None)
+            if bm25 is not None:
+                hit["_rankingScore"] = self._bm25_to_score(bm25)
+            hits.append(hit)
+        return hits
 
 
 class InMemoryBackend(SearchBackend):
