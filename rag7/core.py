@@ -720,6 +720,31 @@ class AgenticRAG:
         return init_chat_model(spec, **kwargs)  # type: ignore[return-value]
 
     @staticmethod
+    def _chain_llm(llm: BaseChatModel, name: str) -> BaseChatModel:
+        """Bind prompt_cache_key for non-Azure OpenAI models.
+
+        Azure OpenAI caches prompt prefixes automatically; for plain OpenAI
+        the key must be supplied explicitly so repeated system-prompt prefixes
+        are served from the prompt cache instead of re-tokenised each call.
+        Each chain gets a unique key to avoid cross-chain cache collisions.
+        """
+        try:
+            from langchain_openai import AzureChatOpenAI
+
+            if isinstance(llm, AzureChatOpenAI):
+                return llm
+        except ImportError:
+            pass
+        try:
+            from langchain_openai import ChatOpenAI
+
+            if isinstance(llm, ChatOpenAI):
+                return cast(BaseChatModel, llm.bind(model_kwargs={"prompt_cache_key": f"rag7-{name}-v1"}))
+        except ImportError:
+            pass
+        return llm
+
+    @staticmethod
     def _default_reranker() -> CohereReranker | LLMReranker:
         """Create default reranker: Cohere if available, else LLM-based."""
         try:
@@ -998,9 +1023,9 @@ class AgenticRAG:
             self._rerank_skip_dominance: float | None = 0.93
             self._rerank_skip_gap: float = 0.1
             langs = [
-                l.strip()
-                for l in os.getenv("RAG_QUERY_LANGUAGES", "de,fr,it,en").split(",")
-                if l.strip()
+                lang.strip()
+                for lang in os.getenv("RAG_QUERY_LANGUAGES", "de,fr,it,en").split(",")
+                if lang.strip()
             ]
             self._filter_intent_words: frozenset[str] = frozenset(
                 w
@@ -1032,28 +1057,29 @@ class AgenticRAG:
         if auto_strategy:
             self._auto_configure(override_hyde_min_words=hyde_min_words is None)
 
-        self._search_query_chain = self._llm.with_structured_output(
+        _ck = self._chain_llm  # applies prompt_cache_key for non-Azure OpenAI
+        self._search_query_chain = _ck(self._llm, "rewrite").with_structured_output(
             SearchQuery, method="json_schema"
         )
-        self._quality_chain = self._llm.with_structured_output(
+        self._quality_chain = _ck(self._llm, "quality-gate").with_structured_output(
             QualityAssessment, method="json_schema"
         )
-        self._multi_query_chain = self._llm.with_structured_output(
+        self._multi_query_chain = _ck(self._llm, "multi-query").with_structured_output(
             MultiQuery, method="json_schema"
         )
-        self._filter_intent_chain = self._llm.with_structured_output(
+        self._filter_intent_chain = _ck(self._llm, "filter-intent").with_structured_output(
             FilterIntent, method="json_schema"
         )
-        self._select_collection_chain = self._llm.with_structured_output(
+        self._select_collection_chain = _ck(self._llm, "select-collection").with_structured_output(
             CollectionIntent, method="json_schema"
         )
-        self._relevance_chain = self._llm.with_structured_output(
+        self._relevance_chain = _ck(self._llm, "relevance").with_structured_output(
             RelevanceCheck, method="json_schema"
         )
-        self._reasoning_chain = self._thinking_llm.with_structured_output(
+        self._reasoning_chain = _ck(self._thinking_llm, "reasoning").with_structured_output(
             ReasoningVerdict, method="json_schema"
         )
-        self._grade_chain = self._grader_llm.with_structured_output(
+        self._grade_chain = _ck(self._grader_llm, "grader").with_structured_output(
             AnswerGrade, method="json_schema"
         )
 
