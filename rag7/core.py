@@ -2218,22 +2218,27 @@ class AgenticRAG:
             rerank_query = f"{state.grader_feedback}. {rerank_query}"
 
         try:
-            arerank_fn = getattr(self._reranker, "arerank", None)
-            if arerank_fn is not None:
-                coro = arerank_fn(rerank_query, rerank_docs, effective_top_n)
-            else:
-                coro = asyncio.get_running_loop().run_in_executor(
-                    None,
-                    self._reranker.rerank,
-                    rerank_query,
-                    rerank_docs,
-                    effective_top_n,
-                )
-            results = await asyncio.wait_for(coro, timeout=self._rerank_timeout_s)
-            indexed = [(r.index, r.relevance_score) for r in results]
+            _rerank_cached = _cache.load("rerank-v1", rerank_query, tuple(rerank_docs))
             expert_fired = False
-            if self._expert_reranker and len(results) >= 2:
-                scores = sorted((r.relevance_score for r in results), reverse=True)
+            if _rerank_cached is not None:
+                indexed = [tuple(r) for r in _rerank_cached]
+            else:
+                arerank_fn = getattr(self._reranker, "arerank", None)
+                if arerank_fn is not None:
+                    coro = arerank_fn(rerank_query, rerank_docs, effective_top_n)
+                else:
+                    coro = asyncio.get_running_loop().run_in_executor(
+                        None,
+                        self._reranker.rerank,
+                        rerank_query,
+                        rerank_docs,
+                        effective_top_n,
+                    )
+                results = await asyncio.wait_for(coro, timeout=self._rerank_timeout_s)
+                indexed = [(r.index, r.relevance_score) for r in results]
+                _cache.save("rerank-v1", rerank_query, tuple(rerank_docs), value=indexed)
+            if self._expert_reranker and len(indexed) >= 2:
+                scores = sorted((s for _, s in indexed), reverse=True)
                 top1 = scores[0]
                 ref = scores[min(len(scores) - 1, 4)]
                 gap = top1 - ref
