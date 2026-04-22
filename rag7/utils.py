@@ -374,6 +374,119 @@ def _dbsf_fuse(
     return [seen[did] for did in sorted(scores, key=scores.__getitem__, reverse=True)]
 
 
+class _RedisByteStore:
+    """Minimal LangChain-compatible ByteStore backed by Redis."""
+
+    def __init__(self, url: str) -> None:
+        import redis as _redis  # type: ignore[import-not-found]
+
+        self._client = _redis.Redis.from_url(url, decode_responses=False)
+
+    def mget(self, keys: list[str]) -> list[bytes | None]:
+        return self._client.mget(keys) if keys else []  # type: ignore[return-value]
+
+    def mset(self, key_value_pairs: list[tuple[str, bytes]]) -> None:
+        if key_value_pairs:
+            self._client.mset(dict(key_value_pairs))
+
+    def mdelete(self, keys: list[str]) -> None:
+        if keys:
+            self._client.delete(*keys)
+
+    def yield_keys(self, *, prefix: str | None = None):  # type: ignore[return]
+        pattern = f"{prefix}*" if prefix else "*"
+        for k in self._client.scan_iter(pattern):
+            yield k.decode() if isinstance(k, bytes) else k
+
+
+class _PgByteStore:
+    """Minimal LangChain-compatible ByteStore backed by Postgres (psycopg)."""
+
+    def __init__(self, dsn: str, table: str = "rag7_lc_embed_cache") -> None:
+        import psycopg  # type: ignore[import-not-found]
+
+        self._dsn = dsn
+        self._table = table
+        with psycopg.connect(dsn) as conn:
+            conn.execute(
+                f"CREATE TABLE IF NOT EXISTS {table} "  # noqa: S608
+                "(key TEXT PRIMARY KEY, value BYTEA NOT NULL)"
+            )
+            conn.commit()
+
+    def mget(self, keys: list[str]) -> list[bytes | None]:
+        import psycopg  # type: ignore[import-not-found]
+
+        if not keys:
+            return []
+        with psycopg.connect(self._dsn) as conn:
+            return [
+                (lambda row: bytes(row[0]) if row else None)(
+                    conn.execute(
+                        f"SELECT value FROM {self._table} WHERE key = %s", (k,)  # noqa: S608
+                    ).fetchone()
+                )
+                for k in keys
+            ]
+
+    def mset(self, key_value_pairs: list[tuple[str, bytes]]) -> None:
+        import psycopg  # type: ignore[import-not-found]
+
+        if not key_value_pairs:
+            return
+        with psycopg.connect(self._dsn) as conn:
+            for key, value in key_value_pairs:
+                conn.execute(
+                    f"INSERT INTO {self._table}(key, value) VALUES (%s, %s) "  # noqa: S608
+                    "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+                    (key, value),
+                )
+            conn.commit()
+
+    def mdelete(self, keys: list[str]) -> None:
+        import psycopg  # type: ignore[import-not-found]
+
+        if not keys:
+            return
+        with psycopg.connect(self._dsn) as conn:
+            for key in keys:
+                conn.execute(
+                    f"DELETE FROM {self._table} WHERE key = %s", (key,)  # noqa: S608
+                )
+            conn.commit()
+
+    def yield_keys(self, *, prefix: str | None = None):  # type: ignore[return]
+        import psycopg  # type: ignore[import-not-found]
+
+        with psycopg.connect(self._dsn) as conn:
+            if prefix:
+                rows = conn.execute(
+                    f"SELECT key FROM {self._table} WHERE key LIKE %s",  # noqa: S608
+                    (prefix + "%",),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    f"SELECT key FROM {self._table}"  # noqa: S608
+                ).fetchall()
+        yield from (row[0] for row in rows)
+
+
+def _make_embed_byte_store(uri: str) -> Any:
+    """Return a LangChain-compatible ByteStore from a URI or filesystem path.
+
+    - ``redis://`` / ``rediss://``  → ``_RedisByteStore`` (requires ``redis``)
+    - ``postgres://`` / ``postgresql://`` → ``_PgByteStore`` (requires ``psycopg``)
+    - anything else → ``LocalFileStore`` (treated as directory path, ``~`` expanded)
+    """
+    if uri.startswith(("redis://", "rediss://")):
+        return _RedisByteStore(uri)
+    if uri.startswith(("postgres://", "postgresql://")):
+        return _PgByteStore(uri)
+    from langchain.storage import LocalFileStore  # type: ignore[import-not-found]
+
+    return LocalFileStore(str(Path(uri).expanduser()))
+
+
 async def _embed_all_async(
     embed_fn: Callable[[str], list[float]],
     texts: list[str],
@@ -393,32 +506,31 @@ def embed_fn_from_langchain(
     embeddings: Any,
     *,
     prefer_query: bool = True,
-    cache_dir: str | Path | None = None,
+    cache: str | Path | None = None,
     namespace: str = "embeddings",
 ) -> Callable[[str], list[float]]:
     """Wrap any LangChain ``Embeddings`` instance as an rag7 ``embed_fn``.
 
-    Pass ``cache_dir`` to enable transparent disk caching via
-    ``CacheBackedEmbeddings`` — no manual wiring required:
+    Caching is auto-enabled when ``RAG7_EMBED_CACHE_URL`` is set, or pass
+    ``cache`` explicitly.  Both accept a filesystem path, Redis URL, or
+    Postgres DSN:
 
     .. code-block:: python
 
         from langchain_openai import AzureOpenAIEmbeddings
         from rag7.utils import embed_fn_from_langchain
 
-        rag = AgenticRAG(
-            index="docs",
-            backend=MeilisearchBackend("docs"),
-            embed_fn=embed_fn_from_langchain(
-                AzureOpenAIEmbeddings(...),
-                cache_dir="~/.cache/rag7/embeddings",
-                namespace="text-embedding-3-small",
-            ),
-        )
+        # disk cache
+        embed_fn_from_langchain(emb, cache="~/.cache/rag7/lc", namespace="text-embedding-3-small")
+        # Redis
+        embed_fn_from_langchain(emb, cache="redis://localhost:6379/0", namespace="te3s")
+        # Postgres
+        embed_fn_from_langchain(emb, cache="postgresql://user:pw@host/db", namespace="te3s")
+        # env-driven (set RAG7_EMBED_CACHE_URL in environment)
+        embed_fn_from_langchain(emb, namespace="text-embedding-3-small")
 
-    Or bring your own ``CacheBackedEmbeddings`` for custom stores (Redis,
-    S3, shared filesystem, etc.) — the cache bypass bug is handled
-    automatically (``embed_documents`` is called so the cache is hit).
+    Or bring your own ``CacheBackedEmbeddings`` — the cache bypass bug
+    (``embed_query`` skips the cache) is fixed automatically.
 
     Parameters
     ----------
@@ -427,20 +539,19 @@ def embed_fn_from_langchain(
         ``.embed_documents([text]) -> list[list[float]]``.
     prefer_query:
         Call ``.embed_query()`` when available (default True). Ignored when
-        ``cache_dir`` is set or a ``CacheBackedEmbeddings`` instance is
-        detected — those cache via ``embed_documents``.
-    cache_dir:
-        Directory for a ``LocalFileStore``-backed ``CacheBackedEmbeddings``.
-        Expands ``~``. Requires ``langchain`` (already a rag7 dependency).
+        caching is active or a ``CacheBackedEmbeddings`` instance is detected.
+    cache:
+        Filesystem path, ``redis://`` URL, or ``postgres://`` DSN. Falls back
+        to ``RAG7_EMBED_CACHE_URL`` env var when omitted.
     namespace:
         Cache key prefix — use the model name to avoid collisions between
-        different embedding deployments sharing the same ``cache_dir``.
+        different embedding deployments sharing the same store.
     """
-    if cache_dir is not None:
-        from langchain.embeddings import CacheBackedEmbeddings
-        from langchain.storage import LocalFileStore
+    cache_uri = str(cache) if cache is not None else os.environ.get("RAG7_EMBED_CACHE_URL", "").strip()
+    if cache_uri:
+        from langchain.embeddings import CacheBackedEmbeddings  # type: ignore[import-not-found]
 
-        store = LocalFileStore(str(Path(cache_dir).expanduser()))
+        store = _make_embed_byte_store(cache_uri)
         embeddings = CacheBackedEmbeddings.from_bytes_store(
             embeddings,
             store,
