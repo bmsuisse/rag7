@@ -3732,6 +3732,7 @@ class AgenticRAG:
             extra_bm25 = [a for a in extra_bm25 if a not in (state.query_variants or [])]
             if state.query not in extra_bm25:
                 extra_bm25.append(state.query)
+        extra_bm25 = extra_bm25[:3]
         broad_docs, bm25_empty = await self._asearch(
             _broad_query,
             question=state.question,
