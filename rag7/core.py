@@ -1426,6 +1426,22 @@ class AgenticRAG:
         _cache.save("hyde-v1", self.hyde_style_hint or "", query, value=text)
         return text
 
+    def _cached_batch_search(self, requests: "list[Any]") -> "list[list[dict]]":
+        key = tuple(
+            (
+                r.query, r.limit, r.semantic_ratio, r.filter_expr or "",
+                tuple(r.sort_fields) if r.sort_fields else (),
+                r.show_ranking_score, r.matching_strategy, r.embedder_name, r.index_uid or "",
+            )
+            for r in requests
+        )
+        cached = _cache.load("batch-search-v1", self.index, key)
+        if cached is not None:
+            return cached
+        results = self.backend.batch_search(requests)
+        _cache.save("batch-search-v1", self.index, key, value=results)
+        return results
+
     def _multi_search(
         self,
         queries: list[str],
@@ -1443,7 +1459,7 @@ class AgenticRAG:
             self._make_search_request(q, limit, vector=v, filter_expr=combined_filter)
             for q, v in zip(queries, vecs)
         ]
-        results = self.backend.batch_search(requests)
+        results = self._cached_batch_search(requests)
         fused = _rrf_fuse(results)
         return [
             Document(page_content=self._hit_to_text(h), metadata=h)
@@ -1669,7 +1685,7 @@ class AgenticRAG:
                 requests.append(_req(v))
                 seen.add(v)
 
-        results = await loop.run_in_executor(None, self.backend.batch_search, requests)
+        results = await loop.run_in_executor(None, self._cached_batch_search, requests)
         bm25_arms = [r for req, r in zip(requests, results) if not req.vector]
         bm25_empty = bool(bm25_arms) and all(len(r) == 0 for r in bm25_arms)
         fuse_method = adaptive_fusion or self.fusion
@@ -1990,7 +2006,7 @@ class AgenticRAG:
                         None, self.backend.search, requests[0]
                     )
                 results = await loop.run_in_executor(
-                    None, self.backend.batch_search, requests
+                    None, self._cached_batch_search, requests
                 )
                 return _rrf_fuse(results)
             except Exception:
@@ -3535,7 +3551,7 @@ class AgenticRAG:
             sort_fields=self.sort_fields,
             show_ranking_score=True,
         )
-        results = await loop.run_in_executor(None, self.backend.batch_search, [req])
+        results = await loop.run_in_executor(None, self._cached_batch_search, [req])
         hits = results[0] if results else []
         return [Document(page_content=self._hit_to_text(h), metadata=h) for h in hits]
 
