@@ -34,20 +34,65 @@ from tests.eval_v2.runner import (
 #   SUITES = [("my_meili_index", "My Product Catalog", MY_HITS)]
 
 ONETRADE_DE_HITS: list[HIT_CASE] = [
+    # ── Boost tests ───────────────────────────────────────────────────────────
+    # Generic category queries: sales_l12m ranking decides the winner.
+    # Expected IDs ordered by descending sales — passes only if boosting
+    # correctly surfaces high-sales items into top-5.
+    #
+    # Trockenbeton: ProOne 016 (5.6M) > ProOne 008 (3.3M) > Fixit (1.2M).
+    # Also tests is_own_brand boost stacking on top of sales signal.
+    ("Trockenbeton", ["4457227", "4477141"], "article_id"),
+    # Wandklosett: Laufen Moderna R UP (14.2M) and Moderna R AP (6.6M).
+    ("Wandklosett", ["5414193", "6993231"], "article_id"),
+    # Geberit Spülkasten: AP128 (10.9M) clear category winner.
+    ("Geberit Spülkasten", ["7501080", "6944630"], "article_id"),
+    # Gipsplatte: Rigips RB-Vario (7.2M) and Knauf GKB (5.3M).
+    ("Gipsplatte", ["1002586", "1002844"], "article_id"),
+    # Dusch-WC: Geberit Aquaclean Mera Classic (17.8M) first.
+    ("Dusch WC", ["7501020", "6190872"], "article_id"),
+    # Badewanne Stahl: Procasa Uno 170x70 (2.4M) — own-brand steel bathtub.
+    ("Badewanne Stahl", ["01802416", "01802418"], "article_id"),
+    # Klebeband Beton: ProOne Betonband (1.6M) — own-brand dominates.
+    ("Klebeband Beton", ["7882736"], "article_id"),
+    # Zement Sack: Jura Flex CEM II (7.8M) then Jura Fix CEM I (6.5M).
+    ("Portlandzement Sack", ["1007008", "7011625"], "article_id"),
+    # Geberit Duschrinne: CleanLine20 30-90cm (6.2M) and 30-130cm (3.5M).
+    ("Geberit Duschrinne", ["6143138", "6143140"], "article_id"),
+    # Spiegelschrank: ProCasa Uno LED (4.8M) — own-brand bestseller.
+    ("Spiegelschrank Bad", ["7998175", "9039415"], "article_id"),
+
+    # ── Brand-filter tests ────────────────────────────────────────────────────
+    # Brand explicitly named — LLM must apply supplier filter.
+    # Without filtering a higher-selling competitor would win.
+    #
+    # Makita Bohrhammer: DHR243ZJ (343k) — clear #1 within Makita.
     ("Makita Akku Bohrhammer 18V", ["1065144", "8170146", "1059195"], "article_id"),
+    # Bosch Winkelschleifer: filter must suppress Makita (which outsells Bosch here).
     ("Bosch Winkelschleifer 125mm", ["1057802", "1058233", "1075261"], "article_id"),
-    ("Schutzhelm Bauhelm", ["1054731", "1060660", "9137783"], "article_id"),
-    ("Hilti Anker Bolzen M12", ["6150515", "1143910"], "article_id"),
-    # Regression guard: supplier-filter + structured-attribute lookup.
-    # "bieröffner von proone" must surface the ProOne Multi-Tool (which
-    # lists "Flaschenöffner" in akeneo_values) — not a random ProOne
-    # bestseller like Trockenbeton. Tests the quality-gate score floor
-    # + _hit_to_text structured-field expansion together.
+    # Bosch Akkuschrauber: GDS 18V-1000 (40k) and GO (37k) are top Bosch sellers.
+    # Without brand filter retriever surfaces Makita (172k) instead.
+    ("Akkuschrauber von Bosch", ["7972540", "7937478"], "article_id"),
+    # Makita Flex (colloquial for Winkelschleifer): Akku-variant (237k) is #1,
+    # followed by corded models. Tests synonym "Flex" → Winkelschleifer.
+    ("Makita Flex 125mm", ["1056499", "1056160", "1056161"], "article_id"),
+    # Eckrohrzange Rothenberger: 45° Set (50k) is their bestseller.
+    ("Eckrohrzange Rothenberger", ["1147007", "1148381"], "article_id"),
+    # Kreissägeblatt Bosch 190mm: Wood 24Z (1585 units) is top seller.
+    ("Kreissägeblatt Bosch 190mm", ["1058304", "1058596", "1058595"], "article_id"),
+    # Klosettsitz Laufen: Moderna R SLIM (3.4M) is the clear bestseller.
+    ("Klosettsitz Laufen", ["6187134", "01780544"], "article_id"),
+    # Geberit Dusch-WC: Aquaclean Mera Classic (17.8M) dominates.
+    ("Dusch-WC Geberit", ["7501020", "6190872", "7843172"], "article_id"),
+    # Kartell Laufen collection: Wandklosett KARTELL LAUFEN UP (652k, 532k).
+    ("Kartell Laufen", ["7889586", "7889588", "7889632"], "article_id"),
+    # Laufen Auflage-Waschtisch: VAL 55cm (131k) and VAL 45cm (117k).
+    ("Auflage Waschtisch Laufen", ["6207643", "6187001"], "article_id"),
+
+    # ── ProOne own-brand catalog ──────────────────────────────────────────────
+    # Regression guard: "bieröffner von proone" must surface the ProOne Multi-Tool
+    # (Flaschenöffner in akeneo_values) — not a random bestseller like Trockenbeton.
+    # Tests quality-gate score floor + _hit_to_text structured-field expansion.
     ("bieröffner von proone", ["1050541", "7794905"], "article_id"),
-    # Natural-language variant: the user's real wording, tests that the
-    # brand-filter + variants + own-brand OR filter together reach a doc
-    # whose searchable name/search_term contains neither "bieröffner" nor
-    # "flaschenöffner" (the latter sits in akeneo_values).
     (
         "haben wir bieröffner von proone?",
         ["1050541", "7794905"],
@@ -58,49 +103,44 @@ ONETRADE_DE_HITS: list[HIT_CASE] = [
         ["1050541", "7794905"],
         "article_id",
     ),
-    # Natural-language queries — prose phrasing users actually type.
-    ("Akkuschrauber von Bosch", ["6260639", "5377125"], "article_id"),
-    ("Winkelschleifer Makita 125mm", ["1056160", "1056161"], "article_id"),
-    ("Schutzhelm in weiss", ["9137783", "1055431"], "article_id"),
-    ("Taschenmesser Victorinox", ["1143505"], "article_id"),
-    ("Stiel für einen Hammer", ["1055521", "1048808"], "article_id"),
-    ("Silikon schwarz Kartusche", ["1006780", "9251987"], "article_id"),
-    ("LED Taschenlampe mit USB", ["7779803"], "article_id"),
-    ("Werkzeugkoffer Aluminium", ["1147106", "7984433"], "article_id"),
-    ("Rohrzange Rothenberger", ["6204301", "1149577"], "article_id"),
-    # ProOne own-brand catalog coverage (pro-one.ch products).
     ("ProOne Schuhreiniger Edi", ["9225388"], "article_id"),
     ("ProOne Baustellenradio Rock One", ["9183348"], "article_id"),
     ("ProOne Kartuschenpistole 225mm", ["1050095"], "article_id"),
     ("ProOne Silikon Sanitär transparent", ["1003220"], "article_id"),
     ("ProOne Elastisches Maleracryl weiss", ["8172012"], "article_id"),
     ("ProOne Montageschaum 1K", ["8171999"], "article_id"),
-    # Natural-language synonym/brand-filter stress cases — these tend to
-    # need the LLM variants + brand filter to resolve.
     ("Schaumpistole von ProOne", ["1050511", "7504843"], "article_id"),
-    ("Schuhputzer proone", ["9225388"], "article_id"),
-    # Sanitary / bathroom — cross-brand recall (Kaldewei / Laufen / Grohe /
-    # Hansgrohe / Geberit / Villeroy Boch).
-    ("Badewanne Stahl emailliert", ["7523696"], "article_id"),
+
+    # ── Synonym / colloquial ──────────────────────────────────────────────────
+    # Silikon schwarz: PCI Silcoferm S 40 (64k) is actual bestseller.
+    ("Silikon schwarz Kartusche", ["7855547", "7520808"], "article_id"),
+    # Hammerstiel: top seller is 1144601 (345 units), niche category.
+    ("Stiel für einen Hammer", ["1144601", "1055521", "1048808"], "article_id"),
+    # Victorinox: Swiss Tool Spirit X (9k) and Ranger Grip 61 (7.5k) are top.
+    ("Messer Victorinox", ["1143516", "1143469"], "article_id"),
+
+    # ── Bathroom fixtures ─────────────────────────────────────────────────────
     ("freistehende Acryl Badewanne 170cm", ["7826586"], "article_id"),
     ("Duschwand Walk-In Glas 150", ["7885103"], "article_id"),
-    ("Auflege-Waschtisch Laufen Kartell", ["7536879", "7536876"], "article_id"),
     ("Hansgrohe Brause sBox", ["7869167", "8188090"], "article_id"),
-    ("Klosettsitz Villeroy Boch", ["6144722"], "article_id"),
-    # General-purpose product queries across categories.
+
+    # ── General tools / hardware ──────────────────────────────────────────────
+    ("Schutzhelm Bauhelm", ["1054731", "1060660", "9137783"], "article_id"),
+    ("Schutzhelm in weiss", ["9137783", "1055431"], "article_id"),
+    ("LED Taschenlampe mit USB", ["7779803"], "article_id"),
+    ("Werkzeugkoffer Aluminium", ["1147106", "7984433"], "article_id"),
     ("Arbeitshandschuh Leder", ["6243635"], "article_id"),
-    ("Makita Bohrhammer SDS Plus 18V", ["1065144"], "article_id"),
-    ("Bosch Kreissägeblatt 190mm", ["1058305", "1058595"], "article_id"),
-    ("ProOne Silikon Sanitär transparent 310ml", ["1003220"], "article_id"),
     ("Bleistift Zimmermann Caran d'Ache", ["7918735", "7919406"], "article_id"),
     ("Maurerkelle 180mm", ["7918976"], "article_id"),
     ("Wasserwaage 60cm BMI", ["7995907"], "article_id"),
     ("Zollstock 2 Meter", ["9174216", "7919077"], "article_id"),
-    # Natural-language / user-phrasing variants.
+
+    # ── Natural-language / user-phrasing variants ─────────────────────────────
     ("welches Radio gibt es von ProOne?", ["9183348"], "article_id"),
     ("ich brauche einen 18V Bohrhammer von Makita", ["1065144"], "article_id"),
-    ("einen Hammer mit kurzem Stiel", ["1055521", "1048808"], "article_id"),
+    ("einen Hammer mit kurzem Stiel", ["1144601", "1055521", "1048808"], "article_id"),
     ("gibt es Schuhreiniger bei euch?", ["9225388"], "article_id"),
+    ("ProOne Silikon Sanitär transparent 310ml", ["1003220"], "article_id"),
 ]
 
 ARTICLE_HITS: list[HIT_CASE] = [
@@ -131,6 +171,11 @@ ONETRADE_DE_EXCLUSIONS: list[EXCLUSION_CASE] = [
     ("trockenbeton aber nicht von fixit", ["fixit"], "article_id"),
     # Same intent phrased differently.
     ("Trockenbeton ohne Fixit", ["fixit"], "article_id"),
+    # Exclude own-brand: user wants Trockenbeton but not ProOne.
+    # Tests that exclusion overrides the is_own_brand boost.
+    ("Trockenbeton nicht von ProOne", ["proone", "procasa"], "article_id"),
+    # Klosettsitz without Laufen — should return Geberit/Neoperl/other brands.
+    ("Klosettsitz nicht Laufen", ["laufen"], "article_id"),
 ]
 
 EXCLUSION_SUITES: list[tuple[str, str, list[EXCLUSION_CASE]]] = [
