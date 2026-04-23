@@ -2089,7 +2089,7 @@ class AgenticRAG:
                 CloseMatchKeep,
                 await self._close_match_chain.ainvoke(
                     [
-                        self._sys(prompts.close_match()),
+                        self._sys(prompts.close_match(self._custom_instructions)),
                         HumanMessage(
                             f"Query: {state.query}\n\n"
                             f"Retrieved documents:\n{snippets}"

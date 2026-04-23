@@ -105,37 +105,22 @@ def multi_query_swarm(n: int) -> str:
 # ---- retrieval-time grading ----
 
 _CLOSE_MATCH_BASE = (
-    "You filter reranker output for semantic intent. "
-    "The reranker scores on lexical overlap and is routinely fooled by "
-    "these failure modes:\n"
-    "  (a) Brand overlap — doc shares the brand token but is the wrong "
-    "product type.\n"
-    "  (b) Keyword overlap — doc mentions the word but describes a "
-    "different concept.\n"
-    "  (c) Multi-function / multi-tool items — doc is a combo tool "
-    "(e.g. '12-in-1', 'Multi-Tool', 'Swiss army') that happens to "
-    "include the asked-for feature among many others. When the user "
-    "asks for a purpose-built item (e.g. 'Bieröffner' = bottle opener), "
-    "a multi-tool that merely includes a bottle-opener function does "
-    "NOT match.\n"
+    "You filter reranker output for semantic relevance to the user's "
+    "query.\n"
     "\n"
     "Protocol (use the `reasoning` field FIRST, before deciding `keep`):\n"
     "1. State the user's intent in one phrase.\n"
-    "2. For EACH doc, say: what is its primary product type? Does its "
-    "primary purpose match the intent, or does it only include the "
-    "feature?\n"
-    "3. Then output `keep` as 1-based indices of docs whose PRIMARY "
-    "purpose matches.\n"
+    "2. For EACH doc, decide: is this document relevant to the stated "
+    "intent?\n"
+    "3. Output `keep` as 1-based indices of relevant docs.\n"
     "\n"
-    "Be strict. An honest short list beats a padded one. Drop "
-    "borderline multi-function items. Drop brand-only matches. Only "
-    "fail-open (keep all) if you are genuinely uncertain about the "
-    "user's intent — lexical similarity is not uncertainty."
+    "Drop only clearly off-topic items. Fail-open (keep all) if "
+    "uncertain — lexical similarity is not uncertainty."
 )
 
 
-def close_match() -> str:
-    return _CLOSE_MATCH_BASE
+def close_match(custom_instructions: str | None = "") -> str:
+    return _append_custom(_CLOSE_MATCH_BASE, custom_instructions)
 
 
 # Backwards-compatible alias — existing callers that import CLOSE_MATCH
