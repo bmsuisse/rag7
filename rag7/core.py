@@ -1917,7 +1917,7 @@ class AgenticRAG:
         t0 = time.perf_counter()
         pool = state.candidate_pool
         cap = self.top_k * 3
-        if len(pool) <= len(state.documents):
+        if state.iterations <= 1 or len(pool) <= len(state.documents):
             self._trace(state, "pool_rerank", t0, path="skip", pool=len(pool))
             return state
         pool_state = state.model_copy(
