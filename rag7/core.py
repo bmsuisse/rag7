@@ -281,8 +281,7 @@ def _doc_to_grader_text(doc: "Document") -> str:
     return doc.page_content
 
 
-def _generic_field_priority(key: str) -> int:
-    """Heuristic field rank when searchable_attributes is unavailable."""
+def _heuristic_field_rank(key: str) -> int:
     k = key.lower()
     if any(x in k for x in ("name", "title", "label", "bezeichnung")):
         return 0
@@ -1015,6 +1014,18 @@ class AgenticRAG:
             if candidates:
                 self.group_field = candidates[0]
 
+        # Build field priority from discovered collection fields so _hit_to_text
+        # doesn't need a schema-specific heuristic at render time.
+        known_fields = sorted({k for d in sample[:5] for k in d.keys()})
+        offset = len(attrs)
+        self._field_priority: dict[str, int] = {
+            field.split(":", 1)[0]: i for i, field in enumerate(attrs)
+        }
+        for field in known_fields:
+            base = field.split(":", 1)[0]
+            if base not in self._field_priority:
+                self._field_priority[base] = offset + _heuristic_field_rank(base)
+
     def _schema_signature(self, sample: list[dict]) -> str:
         import hashlib
 
@@ -1038,44 +1049,29 @@ class AgenticRAG:
 
     def _hit_to_text(self, h: dict) -> str:
         content = h.get("content")
+        fp: dict[str, int] = getattr(self, "_field_priority", {})
 
-        # Use searchable_attributes order: most important fields first so they
-        # survive rerank_chars truncation and the reranker sees them before content.
-        cfg = getattr(self, "_index_config", None)
-        priority: list[str] = cfg.searchable_attributes if cfg else []
-        priority_rank = {k: i for i, k in enumerate(priority)}
-
-        priority_lines: list[tuple[int, str]] = []
-        other_items: list[tuple[int, str]] = []
-
+        items: list[tuple[int, str]] = []
         for k, v in h.items():
             if k in _SKIP_FIELDS or k == "content" or v is None or v == "":
                 continue
             rendered = _render_value(v, indent=0)
             if not rendered:
                 continue
+            rank = fp.get(k)
+            if rank is None:
+                if isinstance(v, str) and content and rendered in content:
+                    continue
+                rank = 1000 + _heuristic_field_rank(k)
             line = (
                 f"**{k}**:\n{rendered}"
                 if "\n" in rendered and not isinstance(v, str)
                 else f"**{k}**: {rendered}"
             )
-            if k in priority_rank:
-                priority_lines.append((priority_rank[k], line))
-            elif priority:
-                # Index config present but field not in searchable_attributes:
-                # skip if already in content, else sort after priority fields
-                if isinstance(v, str) and content and rendered in content:
-                    continue
-                other_items.append((len(line), line))
-            else:
-                # No index config: use generic name/description/category heuristic
-                if isinstance(v, str) and content and rendered in content:
-                    continue
-                other_items.append((_generic_field_priority(k), line))
+            items.append((rank, line))
 
-        top = [line for _, line in sorted(priority_lines)]
-        rest = [line for _, line in sorted(other_items, key=lambda x: x[0])]
-        parts = top + ([str(content)] if content else []) + rest
+        sorted_lines = [line for _, line in sorted(items)]
+        parts = sorted_lines + ([str(content)] if content else [])
         return "\n".join(parts) if parts else ""
 
     def _make_search_request(
