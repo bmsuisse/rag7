@@ -293,6 +293,8 @@ def _heuristic_field_rank(key: str) -> int:
         return 2
     if any(x in k for x in ("category", "group", "type", "gruppe", "kategorie")):
         return 3
+    if any(x in k for x in ("akeneo", "attribute", "feature", "spec", "merkmal", "eigenschaft")):
+        return 4
     return 10
 
 

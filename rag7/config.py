@@ -59,7 +59,7 @@ class RAGConfig(BaseModel):
     max_iter: int = Field(default=3, ge=1, le=20)
     n_swarm_queries: int = Field(default=4, ge=1, le=12)
 
-    rerank_chars: int = Field(default=2048, ge=256, le=16384)
+    rerank_chars: int = Field(default=8192, ge=256, le=32768)
 
     preview_chars: int = Field(default=1500, ge=200, le=4000)
 
@@ -131,7 +131,7 @@ class RAGConfig(BaseModel):
             llm_timeout_s=float(os.getenv("RAG_LLM_TIMEOUT_S", "60.0")),
             max_iter=int(os.getenv("RAG_MAX_ITER", "3")),
             n_swarm_queries=int(os.getenv("RAG_N_SWARM_QUERIES", "4")),
-            rerank_chars=int(os.getenv("RAG_RERANK_CHARS", "2048")),
+            rerank_chars=int(os.getenv("RAG_RERANK_CHARS", "8192")),
             preview_chars=int(os.getenv("RAG_PREVIEW_CHARS", "1500")),
             strong_model=os.getenv("RAG_STRONG_MODEL") or None,
             weak_model=os.getenv("RAG_WEAK_MODEL") or None,
