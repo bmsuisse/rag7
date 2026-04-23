@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import asyncio
@@ -11,6 +10,7 @@ from typing import Any
 from .config import RAGConfig
 
 HitCase = tuple[str, list[str], str]
+
 
 def load_testset(path: str | Path) -> list[HitCase]:
     p = Path(path)
@@ -25,8 +25,8 @@ def load_testset(path: str | Path) -> list[HitCase]:
         for e in entries
     ]
 
-class _EarlyStopCallback:
 
+class _EarlyStopCallback:
     def __init__(self, patience: int) -> None:
         self.patience = patience
         self._best: float | None = None
@@ -42,6 +42,7 @@ class _EarlyStopCallback:
         if self._no_improve >= self.patience:
             study.stop()
 
+
 @dataclass
 class TrialResult:
     config: RAGConfig
@@ -51,9 +52,9 @@ class TrialResult:
     n_hits: int
     n_total: int
 
+
 @dataclass
 class RAGTuner:
-
     backend_factory: Callable[[], Any]
     embed_fn: Callable[[str], list[float]]
     hit_cases: Sequence[HitCase]
@@ -128,7 +129,6 @@ class RAGTuner:
             "bm25_fallback_threshold",
             "fast_accept_score",
             "fast_accept_confidence",
-            "rerank_skip_dominance",
             "expert_threshold",
             "hyde_min_words",
         }
@@ -193,10 +193,6 @@ class RAGTuner:
                 fast_accept_confidence=_opt_float(
                     trial, "fast_accept_confidence", 0.6, 0.95
                 ),
-                rerank_skip_dominance=_opt_float(
-                    trial, "rerank_skip_dominance", 0.6, 0.95
-                ),
-                rerank_skip_gap=trial.suggest_float("rerank_skip_gap", 0.05, 0.3),
                 name_field_boost_max=trial.suggest_float(
                     "name_field_boost_max", 0.0, 0.5
                 ),
@@ -260,7 +256,6 @@ class RAGTuner:
             "short_query_threshold",
             "short_query_sort_tokens",
             "bm25_fallback_semantic_ratio",
-            "rerank_skip_gap",
             "name_field_boost_max",
             "enable_hyde",
             "enable_filter_intent",
@@ -305,7 +300,6 @@ class RAGTuner:
         "enable_preprocess_llm",
         "enable_hyde",
         "bm25_fallback_semantic_ratio",
-        "rerank_skip_gap",
         "short_query_threshold",
         "short_query_sort_tokens",
         "fast_accept_score",
@@ -349,23 +343,30 @@ class RAGTuner:
                     "enable_preprocess_llm": trial.suggest_categorical(
                         "enable_preprocess_llm", [True, False]
                     ),
-                    "enable_hyde": trial.suggest_categorical("enable_hyde", [True, False]),
+                    "enable_hyde": trial.suggest_categorical(
+                        "enable_hyde", [True, False]
+                    ),
                     "bm25_fallback_semantic_ratio": trial.suggest_float(
                         "bm25_fallback_semantic_ratio", 0.7, 1.0
                     ),
-                    "rerank_skip_gap": trial.suggest_float("rerank_skip_gap", 0.05, 0.3),
-                    "short_query_threshold": trial.suggest_int("short_query_threshold", 3, 8),
+                    "short_query_threshold": trial.suggest_int(
+                        "short_query_threshold", 3, 8
+                    ),
                     "short_query_sort_tokens": trial.suggest_categorical(
                         "short_query_sort_tokens", [True, False]
                     ),
                     "fast_accept_score": (
                         trial.suggest_float("fast_accept_score", 0.5, 0.95)
-                        if trial.suggest_categorical("fast_accept_score_enabled", [True, False])
+                        if trial.suggest_categorical(
+                            "fast_accept_score_enabled", [True, False]
+                        )
                         else None
                     ),
                     "fast_accept_confidence": (
                         trial.suggest_float("fast_accept_confidence", 0.6, 0.95)
-                        if trial.suggest_categorical("fast_accept_confidence_enabled", [True, False])
+                        if trial.suggest_categorical(
+                            "fast_accept_confidence_enabled", [True, False]
+                        )
                         else None
                     ),
                 }
@@ -396,10 +397,16 @@ class RAGTuner:
         seed_params: dict[str, Any] = {
             k: baseline_dump[k]
             for k in (
-                "semantic_ratio", "retrieval_factor", "rerank_top_n", "fusion",
-                "enable_filter_intent", "enable_preprocess_llm", "enable_hyde",
-                "bm25_fallback_semantic_ratio", "rerank_skip_gap",
-                "short_query_threshold", "short_query_sort_tokens",
+                "semantic_ratio",
+                "retrieval_factor",
+                "rerank_top_n",
+                "fusion",
+                "enable_filter_intent",
+                "enable_preprocess_llm",
+                "enable_hyde",
+                "bm25_fallback_semantic_ratio",
+                "short_query_threshold",
+                "short_query_sort_tokens",
             )
         }
         for key in ("fast_accept_score", "fast_accept_confidence"):
@@ -447,6 +454,7 @@ class RAGTuner:
                 decoded[key] = baseline.model_dump().get(key)
         merged = baseline.model_dump() | decoded
         return RAGConfig(**merged)
+
 
 def _cli_main() -> None:
     import argparse
@@ -522,6 +530,7 @@ def _cli_main() -> None:
     print(f"\nOverrides from defaults ({len(overrides)}):")
     for k, v in overrides.items():
         print(f"  {k} = {v}")
+
 
 if __name__ == "__main__":
     _cli_main()

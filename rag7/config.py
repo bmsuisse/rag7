@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import os
@@ -8,8 +7,8 @@ from typing import Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field
 
-class RAGConfig(BaseModel):
 
+class RAGConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     top_k: int = Field(default=10, ge=1, le=50)
@@ -30,9 +29,6 @@ class RAGConfig(BaseModel):
     fast_accept_score: float | None = Field(default=0.85, ge=0.0, le=1.0)
 
     fast_accept_confidence: float | None = Field(default=0.9, ge=0.0, le=1.0)
-
-    rerank_skip_dominance: float | None = Field(default=0.93, ge=0.0, le=1.0)
-    rerank_skip_gap: float = Field(default=0.1, ge=0.0, le=1.0)
 
     query_languages: list[str] = Field(default_factory=lambda: ["de", "fr", "it", "en"])
 
@@ -100,10 +96,6 @@ class RAGConfig(BaseModel):
             fast_accept_confidence=_env_float_or_none(
                 "RAG_FAST_ACCEPT_CONFIDENCE", "0.9"
             ),
-            rerank_skip_dominance=_env_float_or_none(
-                "RAG_RERANK_SKIP_DOMINANCE", "0.93"
-            ),
-            rerank_skip_gap=float(os.getenv("RAG_RERANK_SKIP_GAP", "0.1")),
             name_field_boost_max=float(os.getenv("RAG_NAME_FIELD_BOOST_MAX", "0.1")),
             expert_top_n=int(os.getenv("RAG_EXPERT_TOP_N", "10")),
             expert_threshold=_env_float_or_none("RAG_EXPERT_THRESHOLD", "0.15"),
@@ -200,8 +192,14 @@ class RAGConfig(BaseModel):
             return pp
         return cls.from_env()
 
-    def _toml_body(self, table_header: str, reference: "RAGConfig | None" = None) -> str:
-        ref = reference.model_dump() if reference is not None else type(self)().model_dump()
+    def _toml_body(
+        self, table_header: str, reference: "RAGConfig | None" = None
+    ) -> str:
+        ref = (
+            reference.model_dump()
+            if reference is not None
+            else type(self)().model_dump()
+        )
         lines = [table_header]
         disabled: list[str] = []
         for name, value in self.model_dump().items():
@@ -232,7 +230,11 @@ class RAGConfig(BaseModel):
         # Preserve any [rag7.collections.*] sections that follow the global block
         lines = p.read_text().splitlines(keepends=True)
         col_start = next(
-            (i for i, ln in enumerate(lines) if ln.strip().startswith("[rag7.collections.")),
+            (
+                i
+                for i, ln in enumerate(lines)
+                if ln.strip().startswith("[rag7.collections.")
+            ),
             None,
         )
         if col_start is None:
@@ -263,7 +265,11 @@ class RAGConfig(BaseModel):
             return
         # Find end of this section (next section header or EOF)
         end = next(
-            (i for i in range(start + 1, len(lines)) if lines[i].strip().startswith("[")),
+            (
+                i
+                for i in range(start + 1, len(lines))
+                if lines[i].strip().startswith("[")
+            ),
             len(lines),
         )
         p.write_text("".join(lines[:start]) + new_section + "\n" + "".join(lines[end:]))

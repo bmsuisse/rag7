@@ -717,8 +717,6 @@ class AgenticRAG:
             self._bm25_fallback_semantic_ratio = config.bm25_fallback_semantic_ratio
             self._fast_accept_score = config.fast_accept_score
             self._fast_accept_confidence = config.fast_accept_confidence
-            self._rerank_skip_dominance = config.rerank_skip_dominance
-            self._rerank_skip_gap = config.rerank_skip_gap
             self._filter_intent_words: frozenset[str] = frozenset(
                 w
                 for lang in config.query_languages
@@ -758,8 +756,6 @@ class AgenticRAG:
             )
             self._fast_accept_score: float | None = 0.85
             self._fast_accept_confidence: float | None = 0.9
-            self._rerank_skip_dominance: float | None = 0.93
-            self._rerank_skip_gap: float = 0.1
             langs = [
                 lang.strip()
                 for lang in os.getenv("RAG_QUERY_LANGUAGES", "de,fr,it,en").split(",")
@@ -1820,40 +1816,6 @@ class AgenticRAG:
         if state.pre_reranked:
             self._trace(state, "rerank", t0, skipped="pre_reranked")
             return state
-
-        if (
-            not (state.filter_intent and state.filter_intent.field)
-            and not self._expert_reranker
-            and self.name_field
-            and state.query
-        ):
-            q_tokens = [t for t in state.query.lower().split() if len(t) > 3]
-            if q_tokens:
-                top_name = (
-                    state.documents[0].metadata.get(self.name_field) or ""
-                ).lower()
-                token_hits = sum(1 for t in q_tokens if t in top_name)
-                docs_scored = state.documents[:5]
-                scores = [
-                    float(d.metadata.get("_rankingScore", 0.0)) for d in docs_scored
-                ]
-                dom_th = self._rerank_skip_dominance
-                dominant = (
-                    dom_th is not None
-                    and len(scores) >= 2
-                    and scores[0] >= dom_th
-                    and scores[0] - scores[-1] >= self._rerank_skip_gap
-                )
-                if token_hits >= max(1, len(q_tokens) // 2) and dominant:
-                    indexed = [(i, 1.0 / (i + 1)) for i in range(len(state.documents))]
-                    ranked = self._apply_boost(state.documents, indexed, state.query)
-                    new = state.model_copy(
-                        update={"documents": ranked, "expert_fired": False}
-                    )
-                    if _accumulate_pool:
-                        new = self._merge_into_pool(new, ranked)
-                    self._trace(new, "rerank", t0, skipped="confident")
-                    return new
 
         rerank_cap = max(
             int(self.top_k * self._rerank_cap_multiplier), self.rerank_top_n * 2

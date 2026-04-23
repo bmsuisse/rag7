@@ -249,10 +249,6 @@ def main() -> None:
             fast_accept_confidence=_suggest_float_or_none(
                 trial, "fast_accept_confidence", 0.6, 0.95
             ),
-            rerank_skip_dominance=_suggest_float_or_none(
-                trial, "rerank_skip_dominance", 0.6, 0.95
-            ),
-            rerank_skip_gap=trial.suggest_float("rerank_skip_gap", 0.05, 0.3),
             expert_threshold=_suggest_float_or_none(
                 trial, "expert_threshold", 0.05, 0.3
             ),
@@ -314,7 +310,6 @@ def main() -> None:
         "short_query_threshold": baseline.short_query_threshold,
         "short_query_sort_tokens": baseline.short_query_sort_tokens,
         "bm25_fallback_semantic_ratio": baseline.bm25_fallback_semantic_ratio,
-        "rerank_skip_gap": baseline.rerank_skip_gap,
         "enable_hyde": baseline.enable_hyde,
         "enable_filter_intent": baseline.enable_filter_intent,
         "enable_quality_gate": baseline.enable_quality_gate,
@@ -324,7 +319,6 @@ def main() -> None:
         ("bm25_fallback_threshold", baseline.bm25_fallback_threshold),
         ("fast_accept_score", baseline.fast_accept_score),
         ("fast_accept_confidence", baseline.fast_accept_confidence),
-        ("rerank_skip_dominance", baseline.rerank_skip_dominance),
         ("expert_threshold", baseline.expert_threshold),
     ]:
         seed_params.update(_enc(val, key))
@@ -362,7 +356,6 @@ def main() -> None:
         "bm25_fallback_threshold",
         "fast_accept_score",
         "fast_accept_confidence",
-        "rerank_skip_dominance",
         "expert_threshold",
     }
     decoded: dict[str, Any] = {}
