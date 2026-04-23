@@ -129,6 +129,7 @@ class RAGTuner:
             "bm25_fallback_threshold",
             "fast_accept_score",
             "fast_accept_confidence",
+            "rerank_min_score",
             "expert_threshold",
             "hyde_min_words",
         }
@@ -193,6 +194,7 @@ class RAGTuner:
                 fast_accept_confidence=_opt_float(
                     trial, "fast_accept_confidence", 0.6, 0.95
                 ),
+                rerank_min_score=_opt_float(trial, "rerank_min_score", 0.05, 0.5),
                 name_field_boost_max=trial.suggest_float(
                     "name_field_boost_max", 0.0, 0.5
                 ),
@@ -304,6 +306,7 @@ class RAGTuner:
         "short_query_sort_tokens",
         "fast_accept_score",
         "fast_accept_confidence",
+        "rerank_min_score",
     )
 
     def tune_collection(
@@ -369,6 +372,13 @@ class RAGTuner:
                         )
                         else None
                     ),
+                    "rerank_min_score": (
+                        trial.suggest_float("rerank_min_score", 0.05, 0.5)
+                        if trial.suggest_categorical(
+                            "rerank_min_score_enabled", [True, False]
+                        )
+                        else None
+                    ),
                 }
             )
             try:
@@ -409,7 +419,7 @@ class RAGTuner:
                 "short_query_sort_tokens",
             )
         }
-        for key in ("fast_accept_score", "fast_accept_confidence"):
+        for key in ("fast_accept_score", "fast_accept_confidence", "rerank_min_score"):
             val = baseline_dump[key]
             seed_params[f"{key}_enabled"] = val is not None
             if val is not None:
@@ -432,7 +442,7 @@ class RAGTuner:
             if key.endswith("_enabled"):
                 continue
             decoded[key] = value
-        for key in ("fast_accept_score", "fast_accept_confidence"):
+        for key in ("fast_accept_score", "fast_accept_confidence", "rerank_min_score"):
             if best_params.get(f"{key}_enabled") is False:
                 decoded[key] = None
         return RAGConfig(**{**baseline.model_dump(), **decoded})

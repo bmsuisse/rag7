@@ -249,6 +249,9 @@ def main() -> None:
             fast_accept_confidence=_suggest_float_or_none(
                 trial, "fast_accept_confidence", 0.6, 0.95
             ),
+            rerank_min_score=_suggest_float_or_none(
+                trial, "rerank_min_score", 0.05, 0.5
+            ),
             expert_threshold=_suggest_float_or_none(
                 trial, "expert_threshold", 0.05, 0.3
             ),
@@ -319,6 +322,7 @@ def main() -> None:
         ("bm25_fallback_threshold", baseline.bm25_fallback_threshold),
         ("fast_accept_score", baseline.fast_accept_score),
         ("fast_accept_confidence", baseline.fast_accept_confidence),
+        ("rerank_min_score", baseline.rerank_min_score),
         ("expert_threshold", baseline.expert_threshold),
     ]:
         seed_params.update(_enc(val, key))
@@ -356,6 +360,7 @@ def main() -> None:
         "bm25_fallback_threshold",
         "fast_accept_score",
         "fast_accept_confidence",
+        "rerank_min_score",
         "expert_threshold",
     }
     decoded: dict[str, Any] = {}

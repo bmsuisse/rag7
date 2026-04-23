@@ -726,6 +726,7 @@ class AgenticRAG:
             self._bm25_fallback_semantic_ratio = config.bm25_fallback_semantic_ratio
             self._fast_accept_score = config.fast_accept_score
             self._fast_accept_confidence = config.fast_accept_confidence
+            self._rerank_min_score = config.rerank_min_score
             self._filter_intent_words: frozenset[str] = frozenset(
                 w
                 for lang in config.query_languages
@@ -765,6 +766,10 @@ class AgenticRAG:
             )
             self._fast_accept_score: float | None = 0.85
             self._fast_accept_confidence: float | None = 0.9
+            _rms = os.getenv("RAG_RERANK_MIN_SCORE", "0.2")
+            self._rerank_min_score: float | None = (
+                None if _rms.lower() == "none" else float(_rms)
+            )
             langs = [
                 lang.strip()
                 for lang in os.getenv("RAG_QUERY_LANGUAGES", "de,fr,it,en").split(",")
@@ -1329,7 +1334,11 @@ class AgenticRAG:
         hyde_source = question or query
 
         if hyde_text is None:
-            if self.embed_fn and len(hyde_source.split()) >= self.hyde_min_words:
+            n_words = len(hyde_source.split())
+            short_thr = self._short_query_threshold
+            if self.embed_fn and n_words >= 1 and (
+                n_words <= short_thr or n_words >= self.hyde_min_words
+            ):
                 try:
                     hyde_text = await self._ahypothetical_doc(hyde_source)
                 except Exception:
@@ -1686,6 +1695,24 @@ class AgenticRAG:
 
         return [_doc_to_grader_text(d)[: self.rerank_chars] for d in docs]
 
+    def _truncate_low_score(self, docs: list[Document], k: int) -> list[Document]:
+        """Cap at k, then drop docs whose rerank score is below threshold.
+
+        Keeps at least 1 doc. Docs without _rerank_score are treated as passing.
+        Preserves caller ordering (may be non-monotonic after boost).
+        """
+        head = docs[:k]
+        th = self._rerank_min_score
+        if th is None or not head:
+            return head
+        kept = [
+            d
+            for d in head
+            if d.metadata.get("_rerank_score") is None
+            or float(d.metadata["_rerank_score"]) >= th
+        ]
+        return kept or head[:1]
+
     def _apply_boost(
         self,
         docs: list[Document],
@@ -1938,7 +1965,9 @@ class AgenticRAG:
         )
         reranked = await self._arerank(pool_state, _accumulate_pool=False)
         new = state.model_copy(
-            update={"documents": reranked.documents[: self.top_k]}
+            update={
+                "documents": self._truncate_low_score(reranked.documents, self.top_k)
+            }
         )
         self._trace(
             new, "pool_rerank", t0, path="fired", pool=len(pool), kept=len(new.documents)
@@ -3132,10 +3161,12 @@ class AgenticRAG:
         return result
 
     async def _acompute_hyde(self, question: str) -> str:
-        if not self._enable_hyde:
+        if not self._enable_hyde or not self.embed_fn:
             return ""
-        """Pre-compute HyDE text, to be run concurrently with preprocessing."""
-        if self.embed_fn and len(question.split()) >= self.hyde_min_words:
+        n_words = len(question.split())
+        if n_words >= 1 and (
+            n_words <= self._short_query_threshold or n_words >= self.hyde_min_words
+        ):
             try:
                 return await self._ahypothetical_doc(question)
             except Exception:
@@ -3298,7 +3329,7 @@ class AgenticRAG:
                 else 0.0
             )
             if top_rerank >= 0.1:
-                return state.query, state.documents[:k]
+                return state.query, self._truncate_low_score(state.documents, k)
 
         init = RAGState(question=query, query=query)
         preprocess_task = asyncio.create_task(self._apreprocess(init))
@@ -3415,7 +3446,7 @@ class AgenticRAG:
             ranked = self._pin_filter_top(state.documents, filter_docs, pin_to=1)
             if ranked is not state.documents:
                 state = state.model_copy(update={"documents": ranked})
-        return state.query, state.documents[:k]
+        return state.query, self._truncate_low_score(state.documents, k)
 
     def retrieve_documents(
         self, query: str, top_k: int | None = None

@@ -30,6 +30,8 @@ class RAGConfig(BaseModel):
 
     fast_accept_confidence: float | None = Field(default=0.9, ge=0.0, le=1.0)
 
+    rerank_min_score: float | None = Field(default=0.2, ge=0.0, le=1.0)
+
     query_languages: list[str] = Field(default_factory=lambda: ["de", "fr", "it", "en"])
 
     name_field_boost_max: float = Field(default=0.1, ge=0.0, le=1.0)
@@ -96,6 +98,7 @@ class RAGConfig(BaseModel):
             fast_accept_confidence=_env_float_or_none(
                 "RAG_FAST_ACCEPT_CONFIDENCE", "0.9"
             ),
+            rerank_min_score=_env_float_or_none("RAG_RERANK_MIN_SCORE", "0.2"),
             name_field_boost_max=float(os.getenv("RAG_NAME_FIELD_BOOST_MAX", "0.1")),
             expert_top_n=int(os.getenv("RAG_EXPERT_TOP_N", "10")),
             expert_threshold=_env_float_or_none("RAG_EXPERT_THRESHOLD", "0.15"),
