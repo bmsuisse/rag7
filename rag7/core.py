@@ -2208,11 +2208,15 @@ class AgenticRAG:
             top_score = float(
                 state.documents[0].metadata.get("_rankingScore", 0.0) or 0.0
             )
+        query_words = {w.lower() for w in state.question.split() if len(w) > 2}
+        top_text = state.documents[0].page_content.lower() if state.documents else ""
+        has_overlap = bool(query_words) and any(w in top_text for w in query_words)
         if (
             state.filter_intent is None
             and state.iterations <= 1
             and len(state.documents) >= self.top_k
             and top_score >= 0.7
+            and has_overlap
         ):
             new = state.model_copy(update={"quality_ok": True})
             self._trace(
