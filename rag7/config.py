@@ -30,7 +30,7 @@ class RAGConfig(BaseModel):
 
     fast_accept_confidence: float | None = Field(default=0.9, ge=0.0, le=1.0)
 
-    rerank_min_score: float | None = Field(default=0.2, ge=0.0, le=1.0)
+    rerank_min_score: float | None = Field(default=0.1, ge=0.0, le=1.0)
 
     query_languages: list[str] = Field(default_factory=lambda: ["de", "fr", "it", "en"])
 
@@ -39,6 +39,7 @@ class RAGConfig(BaseModel):
     boost_decay_sigma: float = Field(default=0.05, ge=0.001, le=0.5)
 
     enable_close_match_grader: bool = True
+    close_match_strictness: Literal["loose", "balanced", "strict"] = "loose"
 
     expert_top_n: int = Field(default=10, ge=2, le=50)
 
@@ -84,6 +85,14 @@ class RAGConfig(BaseModel):
             raw = os.getenv(key, default)
             return None if raw.lower() == "none" else int(raw)
 
+        def _env_strictness(raw: str) -> Literal["loose", "balanced", "strict"]:
+            v = raw.strip().lower()
+            if v == "balanced":
+                return "balanced"
+            if v == "strict":
+                return "strict"
+            return "loose"
+
         fusion = os.getenv("RAG_FUSION", "rrf")
         if fusion not in ("rrf", "dbsf"):
             fusion = "rrf"
@@ -109,11 +118,14 @@ class RAGConfig(BaseModel):
             fast_accept_confidence=_env_float_or_none(
                 "RAG_FAST_ACCEPT_CONFIDENCE", "0.9"
             ),
-            rerank_min_score=_env_float_or_none("RAG_RERANK_MIN_SCORE", "0.2"),
+            rerank_min_score=_env_float_or_none("RAG_RERANK_MIN_SCORE", "0.1"),
             name_field_boost_max=float(os.getenv("RAG_NAME_FIELD_BOOST_MAX", "0.1")),
             boost_decay_sigma=float(os.getenv("RAG_BOOST_DECAY_SIGMA", "0.05")),
             enable_close_match_grader=bool(
                 int(os.getenv("RAG_ENABLE_CLOSE_MATCH_GRADER", "1"))
+            ),
+            close_match_strictness=_env_strictness(
+                os.getenv("RAG_CLOSE_MATCH_STRICTNESS", "loose")
             ),
             expert_top_n=int(os.getenv("RAG_EXPERT_TOP_N", "10")),
             expert_threshold=_env_float_or_none("RAG_EXPERT_THRESHOLD", "0.15"),
