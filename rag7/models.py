@@ -37,6 +37,7 @@ class RAGState(BaseModel):
     adaptive_semantic_ratio: float | None = None
     adaptive_fusion: str | None = None
     documents: list[Document] = Field(default_factory=list)
+    candidate_pool: list[Document] = Field(default_factory=list)
     answer: str | None = None
     iterations: int = 0
     history: list[ConversationTurn] = Field(default_factory=list)

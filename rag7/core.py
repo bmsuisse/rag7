@@ -1805,7 +1805,7 @@ class AgenticRAG:
         rescored = [(idx_map[r.index], r.relevance_score) for r in results]
         return rescored + tail
 
-    async def _arerank(self, state: RAGState) -> RAGState:
+    async def _arerank(self, state: RAGState, *, _accumulate_pool: bool = True) -> RAGState:
         t0 = time.perf_counter()
         if not state.documents:
             return state
@@ -1842,6 +1842,8 @@ class AgenticRAG:
                     new = state.model_copy(
                         update={"documents": ranked, "expert_fired": False}
                     )
+                    if _accumulate_pool:
+                        new = self._merge_into_pool(new, ranked)
                     self._trace(new, "rerank", t0, skipped="confident")
                     return new
 
@@ -1921,11 +1923,44 @@ class AgenticRAG:
             new = state.model_copy(
                 update={"documents": ranked, "expert_fired": expert_fired}
             )
+            if _accumulate_pool:
+                new = self._merge_into_pool(new, ranked)
             self._trace(new, "rerank", t0, docs=len(ranked), expert_fired=expert_fired)
             return new
         except Exception as e:
             self._trace(state, "rerank", t0, error=type(e).__name__)
             return state
+
+    @staticmethod
+    def _merge_into_pool(state: "RAGState", docs: "list[Document]") -> "RAGState":
+        pool = state.candidate_pool
+        seen = {_doc_id(d.metadata) for d in pool}
+        new_pool = pool + [d for d in docs if _doc_id(d.metadata) not in seen]
+        return state.model_copy(update={"candidate_pool": new_pool})
+
+    async def _apool_rerank(self, state: RAGState) -> RAGState:
+        """Final rerank over the accumulated candidate pool before generation.
+
+        Sends up to top_k * 3 pool docs through Cohere (cached), so iterations
+        that found different candidates each contribute to the final ranking.
+        """
+        t0 = time.perf_counter()
+        pool = state.candidate_pool
+        cap = self.top_k * 3
+        if len(pool) <= len(state.documents):
+            self._trace(state, "pool_rerank", t0, path="skip", pool=len(pool))
+            return state
+        pool_state = state.model_copy(
+            update={"documents": pool[:cap], "pre_reranked": False}
+        )
+        reranked = await self._arerank(pool_state, _accumulate_pool=False)
+        new = state.model_copy(
+            update={"documents": reranked.documents[: self.top_k]}
+        )
+        self._trace(
+            new, "pool_rerank", t0, path="fired", pool=len(pool), kept=len(new.documents)
+        )
+        return new
 
     async def _agenerate(self, state: RAGState) -> RAGState:
         t0 = time.perf_counter()
@@ -2674,6 +2709,7 @@ class AgenticRAG:
             ("rerank", self._arerank),
             ("reason", self._areason),
             ("quality_gate", self._aquality_gate),
+            ("pool_rerank", self._apool_rerank),
             ("generate", self._agenerate),
             ("final_grade", self._afinal_grade),
             ("rewrite", self._arewrite),
@@ -2718,8 +2754,9 @@ class AgenticRAG:
         g.add_conditional_edges(
             "quality_gate",
             self._quality_route,
-            {"generate": "generate", "rewrite": "rewrite", "give_up": "give_up"},
+            {"generate": "pool_rerank", "rewrite": "rewrite", "give_up": "give_up"},
         )
+        g.add_edge("pool_rerank", "generate")
         if self._enable_swarm_grade:
             g.add_conditional_edges(
                 "swarm_grade",
