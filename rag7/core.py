@@ -777,7 +777,7 @@ class AgenticRAG:
             )
             self._fast_accept_score: float | None = 0.85
             self._fast_accept_confidence: float | None = 0.9
-            _rms = os.getenv("RAG_RERANK_MIN_SCORE", "0.5")
+            _rms = os.getenv("RAG_RERANK_MIN_SCORE", "0.2")
             self._rerank_min_score: float | None = (
                 None if _rms.lower() == "none" else float(_rms)
             )

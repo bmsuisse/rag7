@@ -197,4 +197,3 @@ fusion = "dbsf"
 short_query_sort_tokens = true
 bm25_fallback_threshold = 0.3
 bm25_fallback_semantic_ratio = 0.77
-rerank_skip_gap = 0.1
