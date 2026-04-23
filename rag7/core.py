@@ -532,7 +532,16 @@ class AgenticRAG:
     def _default_reranker() -> CohereReranker | LLMReranker:
         try:
             return CohereReranker()
-        except Exception:
+        except Exception as e:
+            import warnings
+
+            warnings.warn(
+                f"CohereReranker unavailable ({type(e).__name__}: {e}). "
+                "Falling back to LLMReranker with no LLM — reranker will return "
+                "positional fallback scores (1/i), effectively a no-op. "
+                "Install cohere (`uv pip install cohere`) or configure a reranker explicitly.",
+                stacklevel=2,
+            )
             return LLMReranker()
 
     @classmethod
