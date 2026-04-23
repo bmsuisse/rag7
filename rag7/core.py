@@ -278,27 +278,21 @@ def _clean_string(s: str) -> str:
 
 
 def _doc_to_grader_text(doc: "Document") -> str:
-    m = doc.metadata
-    lines: list[str] = []
-    for key in (
-        "article_name",
-        "article_id",
-        "brand",
-        "supplier_name",
-        "product_group_l1",
-        "product_group_l2",
-        "product_group_l3",
-        "search_terms",
-    ):
-        v = m.get(key)
-        if v:
-            lines.append(f"**{key}**: {_clean_string(str(v))}")
-    akeneo = m.get("akeneo_values")
-    if isinstance(akeneo, dict):
-        for k, v in akeneo.items():
-            if isinstance(v, str) and v.strip():
-                lines.append(f"**{k}**: {_clean_string(v)}")
-    return "\n".join(lines) if lines else doc.page_content[:1500]
+    return doc.page_content
+
+
+def _generic_field_priority(key: str) -> int:
+    """Heuristic field rank when searchable_attributes is unavailable."""
+    k = key.lower()
+    if any(x in k for x in ("name", "title", "label", "bezeichnung")):
+        return 0
+    if any(x in k for x in ("search_term", "keyword", "tag", "description", "beschreibung")):
+        return 1
+    if any(x in k for x in ("brand", "supplier", "manufacturer", "hersteller", "lieferant")):
+        return 2
+    if any(x in k for x in ("category", "group", "type", "gruppe", "kategorie")):
+        return 3
+    return 10
 
 
 def _filter_bohrer_variants(
@@ -1067,11 +1061,17 @@ class AgenticRAG:
             )
             if k in priority_rank:
                 priority_lines.append((priority_rank[k], line))
-            else:
-                # Non-priority: skip if value is already covered by content
+            elif priority:
+                # Index config present but field not in searchable_attributes:
+                # skip if already in content, else sort after priority fields
                 if isinstance(v, str) and content and rendered in content:
                     continue
                 other_items.append((len(line), line))
+            else:
+                # No index config: use generic name/description/category heuristic
+                if isinstance(v, str) and content and rendered in content:
+                    continue
+                other_items.append((_generic_field_priority(k), line))
 
         top = [line for _, line in sorted(priority_lines)]
         rest = [line for _, line in sorted(other_items, key=lambda x: x[0])]
