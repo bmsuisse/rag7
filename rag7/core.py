@@ -1731,7 +1731,7 @@ class AgenticRAG:
         num_fields = getattr(self, "num_fields", None) or []
         if top and len(top) > 1 and num_fields:
             max_score = top[0][1]
-            threshold = max_score * 0.9
+            threshold = max_score * 0.98
             cluster = [(d, s) for d, s in top if s >= threshold]
             if len(cluster) > 1:
 
