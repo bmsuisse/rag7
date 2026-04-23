@@ -38,6 +38,7 @@ from .models import (
     ConversationTurn,
     FilterIntent,
     MultiQuery,
+    ProductCodeQuery,
     QualityAssessment,
     RAGState,
     ReasoningVerdict,
@@ -825,6 +826,9 @@ class AgenticRAG:
         self._grade_chain = _ck(self._grader_llm, "grader").with_structured_output(
             AnswerGrade, method="json_schema"
         )
+        self._product_code_chain = _ck(
+            self._llm, "product-code"
+        ).with_structured_output(ProductCodeQuery, method="json_schema")
 
         self._toolset = RAGToolset(self)
         self._tools = self._toolset.as_tools()
@@ -2835,6 +2839,40 @@ class AgenticRAG:
         self._field_values_cache[cache_key] = field_values
         return field_values
 
+    async def _adetect_product_code(self, query: str) -> str | None:
+        """Return the extracted product code if the query is a code/ID/EAN lookup, else None."""
+        cached = _cache.load("product-code-v1", query)
+        if cached is not None:
+            return cached.get("code")
+        try:
+            result = cast(
+                ProductCodeQuery,
+                await self._product_code_chain.ainvoke(
+                    [
+                        self._sys(
+                            "Detect if the user query is asking to look up a product by a specific "
+                            "numeric code such as an EAN, GTIN, barcode, article number, or internal ID.\n"
+                            "Examples that ARE product-code queries:\n"
+                            "  'EAN 9002886001325' → code='9002886001325'\n"
+                            "  'Artikel-Nr. 12345' → code='12345'\n"
+                            "  'numéro d'article 4011905123' → code='4011905123'\n"
+                            "  'codice articolo 7612345678901' → code='7612345678901'\n"
+                            "  'article number 0600753042' → code='0600753042'\n"
+                            "Examples that are NOT product-code queries:\n"
+                            "  'Bosch Winkelschleifer 125mm' → is_product_code=false\n"
+                            "  'ich brauche einen Hammer' → is_product_code=false\n"
+                            "Return only the numeric digits of the code (strip any prefix words)."
+                        ),
+                        HumanMessage(query),
+                    ]
+                ),
+            )
+        except Exception:
+            return None
+        code = result.code if result.is_product_code and result.code else None
+        _cache.save("product-code-v1", query, value={"code": code})
+        return code
+
     async def _adetect_filter_intent(self, question: str) -> FilterIntent:
         if not self._enable_filter_intent:
             return FilterIntent(field=None, value="", operator="")
@@ -3181,13 +3219,20 @@ class AgenticRAG:
         k = top_k or self.top_k
         limit = int(k * self.retrieval_factor)
 
-        # Pure product-code queries (EAN, GTIN, article IDs) — direct BM25 lookup,
-        # no LLM, no HyDE, no reranking. Fall through if nothing found.
+        # Product-code fast-track: EAN, GTIN, article IDs, barcodes.
+        # Tier 1 — pure digits (no LLM needed).
+        # Tier 2 — mixed query with a long numeric run (e.g. "EAN 9002886001325") → LLM extraction.
+        # Falls through to normal pipeline if nothing found.
         q_stripped = query.strip()
+        _code: str | None = None
         if _PRODUCT_CODE_RE.match(q_stripped):
-            code_docs = await self._afast_keyword_retrieve(q_stripped, limit)
+            _code = q_stripped
+        elif re.search(r"\d{5,}", q_stripped):
+            _code = await self._adetect_product_code(q_stripped)
+        if _code:
+            code_docs = await self._afast_keyword_retrieve(_code, limit)
             if code_docs:
-                return q_stripped, code_docs[:k]
+                return _code, code_docs[:k]
 
         has_filter_word = any(
             w.lower().strip("?,!.") in self._filter_intent_words for w in query.split()

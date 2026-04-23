@@ -9,20 +9,12 @@ from pydantic import BaseModel, ConfigDict, Field
 
 @dataclass
 class RerankResult:
-    """Single reranking result."""
-
     index: int
     relevance_score: float
 
 
 @runtime_checkable
 class Reranker(Protocol):
-    """Protocol for reranking backends.
-
-    Any object exposing this signature can be used as a reranker —
-    no inheritance required.
-    """
-
     def rerank(
         self,
         query: str,
@@ -90,8 +82,6 @@ class MultiQuery(BaseModel):
 
 
 class ReasoningVerdict(BaseModel):
-    """Per-document relevance verdict from the reasoning node."""
-
     reasoning: str = Field(
         default="",
         description="Brief chain-of-thought explaining the verdict.",
@@ -118,9 +108,17 @@ class FilterIntent(BaseModel):
 
 
 class CollectionIntent(BaseModel):
-    """LLM-selected subset of collection names to query."""
-
     collections: list[str] = Field(default_factory=list)
+
+
+class ProductCodeQuery(BaseModel):
+    is_product_code: bool = Field(
+        description="True if the query is asking to look up a product by a specific code, ID, EAN, GTIN, barcode, or article number."
+    )
+    code: str | None = Field(
+        default=None,
+        description="The extracted numeric code (digits only, no prefix words). Null if not a product-code query.",
+    )
 
 
 RAGState.model_rebuild()
