@@ -755,6 +755,7 @@ class AgenticRAG:
             self._enable_swarm_grade = config.enable_swarm_grade
             self._enable_close_match_grader = bool(config.enable_close_match_grader)
             self._close_match_strictness: str = config.close_match_strictness
+            self._close_match_min_top_rerank: float | None = config.close_match_min_top_rerank
             self._rerank_timeout_s = config.rerank_timeout_s
             self._llm_timeout_s = config.llm_timeout_s
             self.max_iter = config.max_iter
@@ -806,6 +807,8 @@ class AgenticRAG:
                 int(os.getenv("RAG_ENABLE_CLOSE_MATCH_GRADER", "1"))
             )
             self._close_match_strictness = os.getenv("RAG_CLOSE_MATCH_STRICTNESS", "loose")
+            _cmr = os.getenv("RAG_CLOSE_MATCH_MIN_TOP_RERANK")
+            self._close_match_min_top_rerank: float | None = float(_cmr) if _cmr else None
             self._rerank_timeout_s = 30.0
             self._llm_timeout_s = 60.0
             self._name_field_boost_max: float = float(
@@ -3187,7 +3190,9 @@ class AgenticRAG:
                 else 0.0
             )
             if top_rerank >= 0.1:
-                state = await self._aclose_match_grade(state)
+                _skip_th = self._close_match_min_top_rerank
+                if _skip_th is None or top_rerank < _skip_th:
+                    state = await self._aclose_match_grade(state)
                 return state.query, self._truncate_low_score(state.documents, k)
 
         init = RAGState(question=query, query=query)
@@ -3305,7 +3310,14 @@ class AgenticRAG:
             ranked = self._pin_filter_top(state.documents, filter_docs, pin_to=1)
             if ranked is not state.documents:
                 state = state.model_copy(update={"documents": ranked})
-        state = await self._aclose_match_grade(state)
+        top_rerank_full = (
+            float(state.documents[0].metadata.get("_rerank_score", 0.0))
+            if state.documents
+            else 0.0
+        )
+        _skip_th = self._close_match_min_top_rerank
+        if _skip_th is None or top_rerank_full < _skip_th:
+            state = await self._aclose_match_grade(state)
         return state.query, self._truncate_low_score(state.documents, k)
 
     def retrieve_documents(

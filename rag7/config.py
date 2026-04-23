@@ -40,6 +40,7 @@ class RAGConfig(BaseModel):
 
     enable_close_match_grader: bool = True
     close_match_strictness: Literal["loose", "balanced", "strict"] = "loose"
+    close_match_min_top_rerank: float | None = Field(default=0.5, ge=0.0, le=1.0)
 
     expert_top_n: int = Field(default=10, ge=2, le=50)
 
@@ -126,6 +127,9 @@ class RAGConfig(BaseModel):
             ),
             close_match_strictness=_env_strictness(
                 os.getenv("RAG_CLOSE_MATCH_STRICTNESS", "loose")
+            ),
+            close_match_min_top_rerank=_env_float_or_none(
+                "RAG_CLOSE_MATCH_MIN_TOP_RERANK", "0.5"
             ),
             expert_top_n=int(os.getenv("RAG_EXPERT_TOP_N", "10")),
             expert_threshold=_env_float_or_none("RAG_EXPERT_THRESHOLD", "0.15"),
