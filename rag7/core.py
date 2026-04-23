@@ -766,7 +766,7 @@ class AgenticRAG:
             )
             self._fast_accept_score: float | None = 0.85
             self._fast_accept_confidence: float | None = 0.9
-            _rms = os.getenv("RAG_RERANK_MIN_SCORE", "0.2")
+            _rms = os.getenv("RAG_RERANK_MIN_SCORE", "0.5")
             self._rerank_min_score: float | None = (
                 None if _rms.lower() == "none" else float(_rms)
             )
@@ -1355,11 +1355,14 @@ class AgenticRAG:
 
         lang_filter = f"language = {lang}" if lang else None
         hyde_bm25 = hyde_text if hyde_text != hyde_source else query
-        hybrid_ratio = (
+        raw_ratio = (
             adaptive_semantic_ratio
             if adaptive_semantic_ratio is not None
             else self.semantic_ratio
         )
+        # Clamp to mixed band — always some keyword, always some semantic.
+        # Pure semantic hallucinates on typos; pure BM25 misses paraphrases.
+        hybrid_ratio = min(0.8, max(0.2, raw_ratio))
 
         def _req(q: str, **extra: Any) -> SearchRequest:
             return self._make_search_request(
@@ -1376,8 +1379,6 @@ class AgenticRAG:
         if hyde_bm25 != query:
             requests.append(_req(hyde_bm25))
         requests.append(_req(query, vector=vector, semantic_ratio=hybrid_ratio))
-        if vector and hybrid_ratio < 1.0:
-            requests.append(_req(query, vector=vector, semantic_ratio=1.0))
         seen = {query, hyde_bm25}
         for v in extra_bm25 or []:
             if v and v not in seen:
@@ -1698,20 +1699,20 @@ class AgenticRAG:
     def _truncate_low_score(self, docs: list[Document], k: int) -> list[Document]:
         """Cap at k, then drop docs whose rerank score is below threshold.
 
-        Keeps at least 1 doc. Docs without _rerank_score are treated as passing.
-        Preserves caller ordering (may be non-monotonic after boost).
+        Returns empty list if no doc passes — honest "no results" beats
+        returning an irrelevant top-1 as a confident answer.
+        Docs without _rerank_score are treated as passing (not reranked yet).
         """
         head = docs[:k]
         th = self._rerank_min_score
         if th is None or not head:
             return head
-        kept = [
+        return [
             d
             for d in head
             if d.metadata.get("_rerank_score") is None
             or float(d.metadata["_rerank_score"]) >= th
         ]
-        return kept or head[:1]
 
     def _apply_boost(
         self,
