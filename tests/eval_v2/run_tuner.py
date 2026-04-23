@@ -181,6 +181,20 @@ def main() -> None:
         default=120.0,
         help="Per-trial timeout (seconds) — slow/hung trials score 0",
     )
+    parser.add_argument(
+        "--per-collection",
+        action="store_true",
+        help=(
+            "After global tuning, run a per-collection Optuna pass for each index "
+            "and save the overrides as [rag7.collections.<index>] sections in --output."
+        ),
+    )
+    parser.add_argument(
+        "--collection-trials",
+        type=int,
+        default=20,
+        help="Optuna trials per collection (default 20, fewer than global since search space is smaller)",
+    )
     args = parser.parse_args()
 
     testset = build_testset()
@@ -367,6 +381,36 @@ def main() -> None:
     best = RAGConfig(**merged)
     best.save_toml(args.output)
     print(f"Saved best config -> {args.output}")
+
+    if args.per_collection:
+        from rag7.tuner import RAGTuner
+
+        print(f"\nPer-collection tuning ({args.collection_trials} trials each)...")
+        for index, hit_cases, _ in testset:
+            print(f"\n  [{index}] baseline hit@5 from global best...")
+            col_tuner = RAGTuner(
+                backend_factory=lambda idx=index: MeilisearchBackend(index=idx),
+                embed_fn=embed_fn,
+                hit_cases=hit_cases,
+                latency_weight=0.1,
+            )
+            col_best = col_tuner.tune_collection(
+                index,
+                best,
+                n_trials=args.collection_trials,
+                patience=args.patience,
+                trial_timeout_s=args.trial_timeout_s,
+                show_progress=False,
+            )
+            col_best.save_collection_toml(index, args.output)
+            print(
+                f"  [{index}] semantic_ratio={col_best.semantic_ratio:.3f} "
+                f"retrieval_factor={col_best.retrieval_factor} "
+                f"enable_filter_intent={col_best.enable_filter_intent} "
+                f"-> {args.output}"
+            )
+
+        print(f"\nFinal config with per-collection overrides saved -> {args.output}")
 
 
 if __name__ == "__main__":

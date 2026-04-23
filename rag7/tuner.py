@@ -1,23 +1,3 @@
-"""Optuna-based tuner for `RAGConfig`.
-
-Users bring: a list of (query, expected_ids, id_field) hit cases,
-a backend factory, an embed_fn. The tuner searches the config space
-with optuna's TPE sampler and returns the best config for their corpus.
-
-Install: `pip install rag7[tune]` (adds optuna).
-
-Example:
-    from rag7 import AgenticRAG, MeilisearchBackend
-    from rag7.tuner import RAGTuner
-
-    tuner = RAGTuner(
-        backend_factory=lambda: MeilisearchBackend("my_index"),
-        embed_fn=my_embed_fn,
-        hit_cases=[("kettle 1.7L", ["SKU-123"], "sku"), ...],
-    )
-    best_config = tuner.tune(n_trials=50)
-    best_config.save_toml("rag7.config.toml")
-"""
 
 from __future__ import annotations
 
@@ -30,19 +10,9 @@ from typing import Any
 
 from .config import RAGConfig
 
-
-HitCase = tuple[str, list[str], str]  # (query, expected_ids, id_field)
-
+HitCase = tuple[str, list[str], str]
 
 def load_testset(path: str | Path) -> list[HitCase]:
-    """Load a testset from JSON or JSONL.
-
-    Expected format (either):
-        [{"query": "...", "expected_ids": ["id1"], "id_field": "id"}, ...]
-        OR one object per line (JSONL).
-
-    Returns a list of `(query, expected_ids, id_field)` tuples.
-    """
     p = Path(path)
     text = p.read_text()
     entries: list[dict[str, Any]]
@@ -55,11 +25,7 @@ def load_testset(path: str | Path) -> list[HitCase]:
         for e in entries
     ]
 
-
 class _EarlyStopCallback:
-    """Optuna callback: stop the study if no trial improves for ``patience``
-    consecutive attempts. Mirrors early-stopping patterns from sklearn.
-    """
 
     def __init__(self, patience: int) -> None:
         self.patience = patience
@@ -76,7 +42,6 @@ class _EarlyStopCallback:
         if self._no_improve >= self.patience:
             study.stop()
 
-
 @dataclass
 class TrialResult:
     config: RAGConfig
@@ -86,31 +51,8 @@ class TrialResult:
     n_hits: int
     n_total: int
 
-
 @dataclass
 class RAGTuner:
-    """Tune `RAGConfig` on your hit cases with optuna.
-
-    Parameters
-    ----------
-    backend_factory:
-        Zero-arg callable returning a fresh `SearchBackend` per trial.
-    embed_fn:
-        Embedding function for the agent.
-    hit_cases:
-        List of `(query, expected_ids, id_field)` — hit@k is computed as
-        the fraction of queries where any `expected_id` appears in top-k.
-    eval_k:
-        Top-k cutoff for hit rate computation (default 5).
-    latency_weight:
-        0–1 blend for latency in the objective. 0 = ignore latency,
-        1 = latency dominates. Default 0.15.
-    latency_budget_ms:
-        Queries slower than this (in ms) are penalized linearly.
-    llm / gen_llm / reranker:
-        Forwarded to `AgenticRAG` unchanged. Use small/cheap models during
-        tuning to keep cost down.
-    """
 
     backend_factory: Callable[[], Any]
     embed_fn: Callable[[str], list[float]]
@@ -122,16 +64,9 @@ class RAGTuner:
     gen_llm: Any = None
     reranker: Any = None
     extra_kwargs: dict[str, Any] = field(default_factory=dict)
-    # Optional pool of ``provider:model`` specs the tuner can pick between
-    # for each of the three model tiers (strong / weak / thinking). If empty,
-    # LLMs passed via ``llm=`` / ``gen_llm=`` or env defaults are used and
-    # not varied. Example:
-    #   ``["azure:gpt-5.4", "azure:gpt-5.4-mini", "azure:gpt-5.4-nano"]``
+
     candidate_models: Sequence[str] = field(default_factory=list)
-    # By default, ``strong_model`` (= gen_llm, the final-answer model) is
-    # held constant at whatever the baseline config specifies. Generation
-    # quality is usually not where you want to save a few cents. Set to
-    # ``True`` to include it in the search if you really want to.
+
     tune_strong_model: bool = False
 
     def _build_agent(self, config: RAGConfig) -> Any:
@@ -188,8 +123,6 @@ class RAGTuner:
             n_total=total,
         )
 
-    # Fields whose "None" value is a first-class tuning option
-    # (semantically = disable this stage).
     _NONEABLE_FIELDS = frozenset(
         {
             "bm25_fallback_threshold",
@@ -211,25 +144,6 @@ class RAGTuner:
         patience: int | None = 10,
         trial_timeout_s: float = 180.0,
     ) -> RAGConfig:
-        """Run optuna search and return the best config.
-
-        Explores both scalar knobs and stage-enable toggles. Optional fields
-        (``bm25_fallback_threshold``, ``expert_threshold``, etc.) are explored
-        with a categorical "enabled?" gate so ``None`` (disable the stage) is
-        a first-class hypothesis alongside any numeric value.
-
-        Always enqueues the baseline (default or provided) as trial 0 so
-        tuning can only improve over the starting point.
-
-        Parameters
-        ----------
-        patience:
-            Early-stop the study when no trial improves the best value in
-            this many consecutive attempts. ``None`` disables early stopping.
-        trial_timeout_s:
-            Per-trial hard timeout. Slow or hung trials (typically network
-            stalls) score 0 and don't block the study.
-        """
         try:
             import optuna
         except ImportError as exc:
@@ -243,7 +157,6 @@ class RAGTuner:
         def _opt_float(
             trial: "optuna.Trial", name: str, low: float, high: float
         ) -> float | None:
-            """Float or None — TPE can explore disabling the stage."""
             if trial.suggest_categorical(f"{name}_enabled", [True, False]):
                 return trial.suggest_float(name, low, high)
             return None
@@ -335,7 +248,6 @@ class RAGTuner:
         sampler = optuna.samplers.TPESampler(seed=seed)
         study = optuna.create_study(direction="maximize", sampler=sampler)
 
-        # Seed trial 0 with the shipped baseline so TPE only improves on it.
         baseline_dump = baseline.model_dump()
         seed_params: dict[str, Any] = {}
         for k in (
@@ -382,15 +294,146 @@ class RAGTuner:
 
         return self._decode_best(study.best_params, baseline)
 
+    # Fields that are worth varying per-collection (retrieval shape + pipeline toggles).
+    # Model names, timeouts, and rerank internals stay global.
+    _COLLECTION_TUNABLE = (
+        "semantic_ratio",
+        "retrieval_factor",
+        "rerank_top_n",
+        "fusion",
+        "enable_filter_intent",
+        "enable_preprocess_llm",
+        "enable_hyde",
+        "bm25_fallback_semantic_ratio",
+        "rerank_skip_gap",
+        "short_query_threshold",
+        "short_query_sort_tokens",
+        "fast_accept_score",
+        "fast_accept_confidence",
+    )
+
+    def tune_collection(
+        self,
+        collection: str,
+        global_config: RAGConfig,
+        *,
+        n_trials: int = 30,
+        seed: int = 42,
+        show_progress: bool = True,
+        patience: int | None = 10,
+        trial_timeout_s: float = 180.0,
+    ) -> RAGConfig:
+        """Tune collection-specific overrides on top of global_config.
+
+        Returns a RAGConfig representing the merged (global + collection) best config.
+        Use save_collection_toml() to persist only the overrides.
+        """
+        try:
+            import optuna
+        except ImportError as exc:
+            raise ImportError("Install optuna: pip install rag7[tune]") from exc
+
+        baseline = global_config
+
+        def objective(trial: "optuna.Trial") -> float:
+            config = RAGConfig(
+                **{
+                    **baseline.model_dump(),
+                    "semantic_ratio": trial.suggest_float("semantic_ratio", 0.2, 0.9),
+                    "retrieval_factor": trial.suggest_int("retrieval_factor", 2, 8),
+                    "rerank_top_n": trial.suggest_int("rerank_top_n", 3, 10),
+                    "fusion": trial.suggest_categorical("fusion", ["rrf", "dbsf"]),
+                    "enable_filter_intent": trial.suggest_categorical(
+                        "enable_filter_intent", [True, False]
+                    ),
+                    "enable_preprocess_llm": trial.suggest_categorical(
+                        "enable_preprocess_llm", [True, False]
+                    ),
+                    "enable_hyde": trial.suggest_categorical("enable_hyde", [True, False]),
+                    "bm25_fallback_semantic_ratio": trial.suggest_float(
+                        "bm25_fallback_semantic_ratio", 0.7, 1.0
+                    ),
+                    "rerank_skip_gap": trial.suggest_float("rerank_skip_gap", 0.05, 0.3),
+                    "short_query_threshold": trial.suggest_int("short_query_threshold", 3, 8),
+                    "short_query_sort_tokens": trial.suggest_categorical(
+                        "short_query_sort_tokens", [True, False]
+                    ),
+                    "fast_accept_score": (
+                        trial.suggest_float("fast_accept_score", 0.5, 0.95)
+                        if trial.suggest_categorical("fast_accept_score_enabled", [True, False])
+                        else None
+                    ),
+                    "fast_accept_confidence": (
+                        trial.suggest_float("fast_accept_confidence", 0.6, 0.95)
+                        if trial.suggest_categorical("fast_accept_confidence_enabled", [True, False])
+                        else None
+                    ),
+                }
+            )
+            try:
+                result = asyncio.run(
+                    asyncio.wait_for(
+                        self._score_config(config), timeout=trial_timeout_s
+                    )
+                )
+            except Exception as e:
+                trial.set_user_attr("error", type(e).__name__)
+                return 0.0
+            trial.set_user_attr("hit_rate", result.hit_rate)
+            trial.set_user_attr("mean_latency_ms", result.mean_latency)
+            trial.set_user_attr("n_hits", result.n_hits)
+            return result.score
+
+        sampler = optuna.samplers.TPESampler(seed=seed)
+        study = optuna.create_study(
+            direction="maximize",
+            sampler=sampler,
+            study_name=f"collection-{collection}",
+        )
+
+        # Seed with global baseline
+        baseline_dump = baseline.model_dump()
+        seed_params: dict[str, Any] = {
+            k: baseline_dump[k]
+            for k in (
+                "semantic_ratio", "retrieval_factor", "rerank_top_n", "fusion",
+                "enable_filter_intent", "enable_preprocess_llm", "enable_hyde",
+                "bm25_fallback_semantic_ratio", "rerank_skip_gap",
+                "short_query_threshold", "short_query_sort_tokens",
+            )
+        }
+        for key in ("fast_accept_score", "fast_accept_confidence"):
+            val = baseline_dump[key]
+            seed_params[f"{key}_enabled"] = val is not None
+            if val is not None:
+                seed_params[key] = val
+        study.enqueue_trial(seed_params)
+
+        callbacks: list[Any] = []
+        if patience is not None and patience > 0:
+            callbacks.append(_EarlyStopCallback(patience=patience))
+        study.optimize(
+            objective,
+            n_trials=n_trials,
+            show_progress_bar=show_progress,
+            callbacks=callbacks or None,
+        )
+
+        best_params = study.best_params
+        decoded: dict[str, Any] = {}
+        for key, value in best_params.items():
+            if key.endswith("_enabled"):
+                continue
+            decoded[key] = value
+        for key in ("fast_accept_score", "fast_accept_confidence"):
+            if best_params.get(f"{key}_enabled") is False:
+                decoded[key] = None
+        return RAGConfig(**{**baseline.model_dump(), **decoded})
+
     @classmethod
     def _decode_best(
         cls, best_params: dict[str, Any], baseline: RAGConfig
     ) -> RAGConfig:
-        """Decode optuna search-space params back into RAGConfig fields.
-
-        Collapses ``foo_enabled`` + ``foo`` pairs into either the numeric
-        value or ``None``.
-        """
         decoded: dict[str, Any] = {}
         for key, value in best_params.items():
             if key.endswith("_enabled"):
@@ -405,14 +448,7 @@ class RAGTuner:
         merged = baseline.model_dump() | decoded
         return RAGConfig(**merged)
 
-
 def _cli_main() -> None:
-    """CLI: ``python -m rag7.tuner --hits cases.json --trials 50``.
-
-    Requires an embed_fn and backend factory. This minimal CLI only supports
-    Meilisearch backends (``--index NAME``) and Azure OpenAI embeddings. For
-    other backends, use the Python API directly.
-    """
     import argparse
     import sys
 
@@ -486,7 +522,6 @@ def _cli_main() -> None:
     print(f"\nOverrides from defaults ({len(overrides)}):")
     for k, v in overrides.items():
         print(f"  {k} = {v}")
-
 
 if __name__ == "__main__":
     _cli_main()
