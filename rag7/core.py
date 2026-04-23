@@ -1193,27 +1193,6 @@ class AgenticRAG:
             self._trace(new, "preprocess", t0, path="disabled", query=raw)
             return new
 
-        words = state.question.split()
-        has_filter_word = any(
-            w.lower().strip("?,!.") in self._filter_intent_words for w in words
-        )
-        if len(words) <= self._short_query_threshold and not has_filter_word:
-            raw = _strip_stop_words(state.question) or state.question
-
-            if self._short_query_sort_tokens:
-                tokens = raw.split()
-                if len(tokens) > 1:
-                    raw = " ".join(sorted(tokens, key=str.lower))
-            new = state.model_copy(
-                update={
-                    "query": raw,
-                    "query_variants": [],
-                    "adaptive_semantic_ratio": None,
-                    "adaptive_fusion": None,
-                }
-            )
-            self._trace(new, "preprocess", t0, path="short_skip", query=raw)
-            return new
         cached = _cache.load("preprocess-v5", self._domain_hint or "", state.question)
         if cached:
             try:
