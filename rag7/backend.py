@@ -25,11 +25,6 @@ _IDENT_RE = re.compile(r"^[a-zA-Z_]\w*$")
 
 
 def _validate_filter_expr(expr: str | dict[str, Any] | None) -> str | None:
-    """Reject filter expressions containing SQL injection patterns.
-
-    Dict-form filters are only accepted by backends with native dict APIs
-    (Chroma/Qdrant). SQL/Meili/OData backends require string form.
-    """
     if not expr:
         return None
     if isinstance(expr, dict):
@@ -44,7 +39,6 @@ def _validate_filter_expr(expr: str | dict[str, Any] | None) -> str | None:
 
 
 def _validate_identifiers(names: list[str]) -> list[str]:
-    """Validate that column/table names are safe SQL identifiers."""
     for name in names:
         if not _IDENT_RE.match(name):
             raise ValueError(f"Unsafe identifier rejected: {name!r}")
@@ -53,8 +47,6 @@ def _validate_identifiers(names: list[str]) -> list[str]:
 
 @dataclass
 class SearchRequest:
-    """Backend-agnostic search request."""
-
     query: str
     limit: int
     vector: list[float] | None = None
@@ -69,16 +61,12 @@ class SearchRequest:
 
 @dataclass
 class IndexConfig:
-    """Backend-agnostic index metadata."""
-
     filterable_attributes: list[str] = field(default_factory=list)
     searchable_attributes: list[str] = field(default_factory=list)
     sortable_attributes: list[str] = field(default_factory=list)
     ranking_rules: list[str] = field(default_factory=list)
     embedders: list[str] = field(default_factory=list)
-    # Mapping of embedder name → vector dimensions declared on the index.
-    # Empty when the backend cannot introspect dims (e.g. search-scoped key
-    # can't read settings, or embedder source doesn't pin dims).
+
     embedder_dims: dict[str, int] = field(default_factory=dict)
 
 
@@ -87,7 +75,6 @@ def _distance_rows_to_hits(
     rows: list[Any],
     vector_col: str,
 ) -> list[dict]:
-    """Convert SQL rows with _distance column to hit dicts with _rankingScore."""
     hits: list[dict] = []
     for row in rows:
         hit = dict(zip(cols, row))
@@ -100,12 +87,9 @@ def _distance_rows_to_hits(
 
 
 class SearchBackend(ABC):
-    """Abstract search backend."""
-
     _embed_fn: Any = None
 
     def _resolve_vector(self, request: SearchRequest) -> list[float] | None:
-        """Return vector from request or by calling embed_fn, or None."""
         return request.vector or (
             self._embed_fn(request.query) if self._embed_fn else None
         )
@@ -114,7 +98,6 @@ class SearchBackend(ABC):
     def search(self, request: SearchRequest) -> list[dict]: ...
 
     def batch_search(self, requests: list[SearchRequest]) -> list[list[dict]]:
-        """Default: sequential search. Override for native batch support."""
         return [self.search(r) for r in requests]
 
     @abstractmethod
@@ -129,11 +112,6 @@ class SearchBackend(ABC):
     ) -> list[dict]: ...
 
     def build_filter_expr(self, intent: Any) -> str:
-        """Meili-dialect filter builder (default).
-
-        `intent` is a FilterIntent-like object with `field`, `value`,
-        `operator`, `extra_excludes` attributes.
-        """
         op = intent.operator
         field_name = intent.field
         value = _escape_meili_value(intent.value)
@@ -156,10 +134,6 @@ def _escape_sql_value(v: str) -> str:
 
 
 def _build_sql_filter(intent: Any) -> str:
-    """SQL-dialect filter (LanceDB/DataFusion, DuckDB, pgvector).
-
-    Maps Meili CONTAINS → ILIKE '%v%' (case-insensitive LIKE).
-    """
     op = intent.operator
     field_name = intent.field
     value = _escape_sql_value(intent.value)
@@ -172,7 +146,6 @@ def _build_sql_filter(intent: Any) -> str:
 
 
 def _build_odata_filter(intent: Any) -> str:
-    """Azure AI Search OData filter dialect."""
     op = intent.operator
     op_map = {"=": "eq", "!=": "ne", "<": "lt", "<=": "le", ">": "gt", ">=": "ge"}
     field_name = intent.field
@@ -200,20 +173,12 @@ class MeilisearchBackend(SearchBackend):
             url or os.getenv("MEILI_URL", "http://localhost:7700"),
             api_key or os.getenv("MEILI_KEY", "masterKey"),
         )
-        # Early-warn on typo'd index names. A missing index is a 404 that
-        # search() silently swallows — yields empty results rather than a
-        # visible error, which is hard to debug (looks like "DE dominates
-        # the multi-collection search" when the FR backend actually points
-        # at a non-existent index).
-        # ``fetch_info()`` works with search-scoped API keys and fails only
-        # on actually-missing indexes. ``get_stats()`` would need an admin
-        # key and gave false positives on valid indexes.
+
         try:
             self._client.index(index).fetch_info()
         except Exception as e:  # noqa: BLE001 — missing index / network / etc.
             msg = str(e).lower()
-            # Only warn for "not found" errors — other failures (auth, network)
-            # are separate concerns the user will hit on the next call anyway.
+
             if "not found" in msg or "index_not_found" in msg:
                 import warnings
 
@@ -291,9 +256,6 @@ class MeilisearchBackend(SearchBackend):
             emb_cfg = settings.get("embedders", {}) or {}
             dims: dict[str, int] = {}
             for name, cfg in emb_cfg.items():
-                # The SDK may return either a plain dict (older versions /
-                # REST shape) or a typed embedder dataclass — read dim from
-                # either.
                 d = (
                     cfg.get("dimensions")
                     if isinstance(cfg, dict)
@@ -330,8 +292,7 @@ class MeilisearchBackend(SearchBackend):
 
 
 def _wrap_embed_fn(embed_fn: Any) -> Any:
-    """Wrap a ``str → list[float]`` callable into ChromaDB's EmbeddingFunction protocol."""
-    from chromadb import Documents, EmbeddingFunction, Embeddings
+    from chromadb import Documents, EmbeddingFunction, Embeddings  # ty: ignore[unresolved-import]
 
     class _WrappedEF(EmbeddingFunction):  # type: ignore[type-arg]
         def __init__(self, fn: Any = None) -> None:
@@ -359,15 +320,6 @@ _CHROMA_NOT_CONTAINS_RE = re.compile(r'^\s*NOT\s+(\w+)\s+CONTAINS\s+"([^"]*)"\s*
 
 
 def _chroma_filter_from_str(expr: str) -> dict[str, Any] | None:
-    """Parse the Meili-dialect filter string into a ChromaDB `where` dict.
-
-    Supports: `field = "value"`, `field != "value"`, clauses joined by
-    ` AND `. `NOT field CONTAINS "x"` has no metadata equivalent in
-    Chroma — the clause is dropped and the caller gets a best-effort
-    filter built from the remaining clauses.
-
-    Returns None when nothing could be parsed.
-    """
     clauses: list[dict[str, Any]] = []
     for part in re.split(r"\s+AND\s+", expr):
         m = _CHROMA_EQ_RE.match(part)
@@ -376,7 +328,6 @@ def _chroma_filter_from_str(expr: str) -> dict[str, Any] | None:
             clauses.append({field: value} if op == "=" else {field: {"$ne": value}})
             continue
         if _CHROMA_NOT_CONTAINS_RE.match(part):
-            # Chroma metadata filters have no substring operator; dropping.
             continue
     if not clauses:
         return None
@@ -386,8 +337,6 @@ def _chroma_filter_from_str(expr: str) -> dict[str, Any] | None:
 
 
 class ChromaDBBackend(SearchBackend):
-    """ChromaDB backend. Requires `pip install chromadb`."""
-
     def __init__(
         self,
         collection: str,
@@ -397,7 +346,7 @@ class ChromaDBBackend(SearchBackend):
         port: int = 8000,
         path: str | None = None,
     ):
-        import chromadb
+        import chromadb  # ty: ignore[unresolved-import]
 
         if host:
             self._client = chromadb.HttpClient(host=host, port=port)
@@ -431,7 +380,6 @@ class ChromaDBBackend(SearchBackend):
 
     @staticmethod
     def _prepare_where(filter_expr: Any) -> dict[str, Any] | None:
-        """Chroma expects dict filters; parse string filters we emit."""
         if filter_expr is None:
             return None
         if isinstance(filter_expr, dict):
@@ -490,8 +438,6 @@ class ChromaDBBackend(SearchBackend):
 
 
 class LanceDBBackend(SearchBackend):
-    """LanceDB backend. Requires `pip install lancedb`."""
-
     def build_filter_expr(self, intent: Any) -> str:
         return _build_sql_filter(intent)
 
@@ -503,7 +449,7 @@ class LanceDBBackend(SearchBackend):
         text_column: str = "content",
         vector_column: str = "vector",
     ):
-        import lancedb
+        import lancedb  # ty: ignore[unresolved-import]
 
         self._db = lancedb.connect(db_uri)
         self._table = self._db.open_table(table)
@@ -579,8 +525,6 @@ class LanceDBBackend(SearchBackend):
 
 
 class AzureAISearchBackend(SearchBackend):
-    """Azure AI Search backend. Requires `pip install azure-search-documents`."""
-
     def build_filter_expr(self, intent: Any) -> str:
         return _build_odata_filter(intent)
 
@@ -594,7 +538,7 @@ class AzureAISearchBackend(SearchBackend):
         semantic_config: str | None = None,
     ):
         from azure.core.credentials import AzureKeyCredential
-        from azure.search.documents import SearchClient
+        from azure.search.documents import SearchClient  # ty: ignore[unresolved-import]
 
         endpoint = endpoint or os.getenv("AZURE_SEARCH_ENDPOINT", "")
         api_key = api_key or os.getenv("AZURE_SEARCH_API_KEY", "")
@@ -609,7 +553,7 @@ class AzureAISearchBackend(SearchBackend):
         self.index = index
 
     def search(self, request: SearchRequest) -> list[dict]:
-        from azure.search.documents.models import VectorizableTextQuery, VectorizedQuery
+        from azure.search.documents.models import VectorizableTextQuery, VectorizedQuery  # ty: ignore[unresolved-import]
 
         kwargs: dict[str, Any] = {
             "search_text": request.query or None,
@@ -617,7 +561,6 @@ class AzureAISearchBackend(SearchBackend):
         }
 
         if self._embed_fn is None and request.query:
-            # No client-side embedder — use native integrated vectorization
             kwargs["vector_queries"] = [
                 VectorizableTextQuery(
                     text=request.query,
@@ -641,7 +584,7 @@ class AzureAISearchBackend(SearchBackend):
             kwargs["semantic_configuration_name"] = self._semantic_config
 
         if request.filter_expr:
-            kwargs["filter"] = request.filter_expr  # OData filter syntax
+            kwargs["filter"] = request.filter_expr
 
         if request.sort_fields:
             kwargs["order_by"] = request.sort_fields
@@ -655,7 +598,7 @@ class AzureAISearchBackend(SearchBackend):
     def get_index_config(self) -> IndexConfig:
         try:
             from azure.core.credentials import AzureKeyCredential
-            from azure.search.documents.indexes import SearchIndexClient
+            from azure.search.documents.indexes import SearchIndexClient  # ty: ignore[unresolved-import]
 
             endpoint = os.getenv("AZURE_SEARCH_ENDPOINT", "")
             api_key = os.getenv("AZURE_SEARCH_API_KEY", "")
@@ -749,7 +692,7 @@ class PgvectorBackend(SearchBackend):
         """
         try:
             with self._conn.cursor() as cur:
-                cur.execute(sql, (vector, request.limit))  # type: ignore[arg-type]
+                cur.execute(sql, (vector, request.limit))  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
                 cols = [desc[0] for desc in cur.description or []]
                 rows = cur.fetchall()
                 return self._rows_to_hits(cols, rows)
@@ -774,7 +717,7 @@ class PgvectorBackend(SearchBackend):
         params.append(request.limit)
         try:
             with self._conn.cursor() as cur:
-                cur.execute(sql, params)  # type: ignore[arg-type]
+                cur.execute(sql, params)  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
                 cols = [desc[0] for desc in cur.description or []]
                 rows = cur.fetchall()
                 return self._rows_to_hits(cols, rows)
@@ -815,7 +758,7 @@ class PgvectorBackend(SearchBackend):
         sql = f"SELECT {cols} FROM {self._table} {where} LIMIT %s"
         try:
             with self._conn.cursor() as cur:
-                cur.execute(sql, (limit,))  # type: ignore[arg-type]
+                cur.execute(sql, (limit,))  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
                 col_names = [desc[0] for desc in cur.description or []]
                 rows = cur.fetchall()
                 return [dict(zip(col_names, row)) for row in rows]
@@ -827,8 +770,6 @@ class PgvectorBackend(SearchBackend):
 
 
 class PostgresFTSBackend(SearchBackend):
-    """PostgreSQL full-text backend without pgvector."""
-
     def build_filter_expr(self, intent: Any) -> str:
         return _build_sql_filter(intent)
 
@@ -876,7 +817,7 @@ class PostgresFTSBackend(SearchBackend):
             params = [request.limit]
         try:
             with self._conn.cursor() as cur:
-                cur.execute(sql, params)  # type: ignore[arg-type]
+                cur.execute(sql, params)  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
                 cols = [desc[0] for desc in cur.description or []]
                 rows = cur.fetchall()
                 return self._rows_to_hits(cols, rows)
@@ -916,7 +857,7 @@ class PostgresFTSBackend(SearchBackend):
         sql = f"SELECT {cols} FROM {self._table} {where} LIMIT %s"
         try:
             with self._conn.cursor() as cur:
-                cur.execute(sql, (limit,))  # type: ignore[arg-type]
+                cur.execute(sql, (limit,))  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
                 col_names = [desc[0] for desc in cur.description or []]
                 rows = cur.fetchall()
                 return [dict(zip(col_names, row)) for row in rows]
@@ -945,8 +886,6 @@ class PostgresFTSBackend(SearchBackend):
 
 
 class QdrantBackend(SearchBackend):
-    """Qdrant backend. Requires `pip install qdrant-client`."""
-
     def __init__(
         self,
         collection: str,
@@ -1091,13 +1030,13 @@ class DuckDBBackend(SearchBackend):
         vector_column: str = "embedding",
         content_column: str = "content",
     ):
-        import duckdb
+        import duckdb  # ty: ignore[unresolved-import]
 
         self._conn = duckdb.connect(db_path)
         try:
             self._conn.execute("INSTALL vss; LOAD vss;")
         except Exception:
-            pass  # VSS may already be loaded or unavailable
+            pass
         try:
             self._conn.execute("INSTALL fts; LOAD fts;")
         except Exception:
@@ -1196,8 +1135,6 @@ class DuckDBBackend(SearchBackend):
 
 
 class SQLiteFTSBackend(SearchBackend):
-    """SQLite backend with FTS5 when available, LIKE fallback otherwise."""
-
     def build_filter_expr(self, intent: Any) -> str:
         return _build_sql_filter(intent)
 
@@ -1327,11 +1264,6 @@ class SQLiteFTSBackend(SearchBackend):
 
 
 class InMemoryBackend(SearchBackend):
-    """In-memory vector store using langchain-core's InMemoryVectorStore.
-
-    Zero external dependencies — works out of the box for quick prototyping.
-    """
-
     def __init__(
         self,
         embed_fn: Any = None,
@@ -1369,7 +1301,6 @@ class InMemoryBackend(SearchBackend):
         self._store = InMemoryVectorStore(embedding=_WrapEmbed())
 
     def add_documents(self, documents: list[dict], text_key: str = "content") -> None:
-        """Add documents to the in-memory store."""
         from langchain_core.documents import Document
 
         self._documents.extend(documents)
@@ -1403,7 +1334,6 @@ class InMemoryBackend(SearchBackend):
             except Exception:
                 pass
 
-        # Fallback: naive substring match over pre-lowercased doc text.
         query_lower = request.query.lower()
         hits: list[dict] = []
         for doc, text in zip(self._documents, self._doc_text_lower):
@@ -1437,14 +1367,6 @@ class InMemoryBackend(SearchBackend):
 
 
 class _MultiBackend(SearchBackend):
-    """Wraps N backends and fans out searches to the active subset.
-
-    Active subset is taken from the `_ACTIVE_COLLECTIONS` ContextVar; an empty
-    value or None means all backends. Each returned hit is tagged with the
-    originating collection name via ``_collection`` so callers can merge,
-    dedupe, or filter downstream.
-    """
-
     def __init__(self, backends: dict[str, SearchBackend]):
         if not backends:
             raise ValueError("_MultiBackend requires at least one backend")
@@ -1531,11 +1453,6 @@ class _MultiBackend(SearchBackend):
         return samples[:limit]
 
     def add_documents(self, documents: list[dict], *args, **kwargs) -> None:
-        """Route documents to their collection by `_collection` field.
-
-        Documents without `_collection` are rejected: with N backends the
-        target is ambiguous.
-        """
         buckets: dict[str, list[dict]] = {n: [] for n in self._backends}
         missing: list[dict] = []
         for doc in documents:

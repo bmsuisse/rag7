@@ -1,13 +1,9 @@
-"""Convenience factory for one-line Agent initialisation."""
-
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Callable
 
 if TYPE_CHECKING:
     from .core import AgenticRAG
-
-# ── backend aliases ────────────────────────────────────────────────────────────
 
 _BACKEND_ALIASES: dict[str, str] = {
     "memory": "InMemoryBackend",
@@ -33,8 +29,6 @@ _BACKEND_ALIASES: dict[str, str] = {
     "azure_ai_search": "AzureAISearchBackend",
     "azureaisearch": "AzureAISearchBackend",
 }
-
-# ── reranker aliases ───────────────────────────────────────────────────────────
 
 _RERANKER_ALIASES: dict[str, str] = {
     "cohere": "CohereReranker",
@@ -64,7 +58,6 @@ def _build_backend(
 
     cls = getattr(_backend_mod, cls_name)
 
-    # merge url / embed_fn into backend_kwargs only if the class accepts them
     import inspect
 
     sig = inspect.signature(cls.__init__)
@@ -103,11 +96,6 @@ def _build_collections_map(
     embed_fn: Callable[[str], list[float]] | None,
     backend_kwargs: dict[str, Any],
 ) -> dict[str, Any]:
-    """Build one backend per collection name, sharing backend type/url.
-
-    Accepts either a list of names or a {name: description} dict — the
-    descriptions are consumed by AgenticRAG, not here.
-    """
     names = list(collections.keys() if isinstance(collections, dict) else collections)
     if not names:
         raise ValueError("collections must contain at least one name")
@@ -160,103 +148,6 @@ def init_agent(
     embed_fn: Callable[[str], list[float]] | None = None,
     **kwargs: Any,
 ) -> "AgenticRAG":
-    """Create a fully configured ``AgenticRAG`` in one call.
-
-    Parameters
-    ----------
-    index:
-        Collection / index name.
-    model:
-        Provider-prefixed model string passed to ``init_chat_model``,
-        e.g. ``"openai:gpt-5.4"``, ``"anthropic:claude-sonnet-4-6"``,
-        ``"ollama:llama3"``.  If omitted, the default LLM from environment
-        variables is used (same behaviour as constructing ``Agent`` directly).
-    gen_model:
-        Separate generation model.  Defaults to ``model``.
-    backend:
-        Either a backend instance **or** a string alias:
-
-        =============================  ================================
-        String                         Class
-        =============================  ================================
-        ``"memory"`` / ``"in_memory"`` ``InMemoryBackend`` (default)
-        ``"chroma"`` / ``"chromadb"``  ``ChromaDBBackend``
-        ``"qdrant"``                   ``QdrantBackend``
-        ``"lancedb"`` / ``"lance"``    ``LanceDBBackend``
-        ``"duckdb"``                   ``DuckDBBackend``
-        ``"pgvector"`` / ``"pg"``      ``PgvectorBackend``
-        ``"meilisearch"``              ``MeilisearchBackend``
-        ``"azure"``                    ``AzureAISearchBackend``
-        =============================  ================================
-
-    backend_url:
-        URL / endpoint forwarded to the backend constructor (``url`` or
-        ``endpoint`` parameter, depending on the backend).
-    backend_kwargs:
-        Extra keyword arguments forwarded verbatim to the backend constructor.
-    reranker:
-        Either a reranker instance **or** a string alias:
-
-        =====================  ========================
-        String                 Class
-        =====================  ========================
-        ``"cohere"``           ``CohereReranker``
-        ``"huggingface"``      ``HuggingFaceReranker``
-        ``"jina"``             ``JinaReranker``
-        ``"llm"``              ``LLMReranker``
-        ``"rerankers"``        ``RerankersReranker``
-        =====================  ========================
-
-    reranker_model:
-        Model name forwarded to the reranker constructor (where applicable).
-    reranker_kwargs:
-        Extra keyword arguments forwarded verbatim to the reranker constructor.
-    embed_fn:
-        Embedding callable ``(str) -> list[float]``.  Forwarded to both the
-        agent and the backend constructor (when the backend accepts it).
-    **kwargs:
-        Any remaining ``AgenticRAG.__init__`` keyword arguments (``top_k``,
-        ``instructions``, ``auto_strategy``, ``filter``, …).
-
-    Examples
-    --------
-    Minimal — in-memory, env-var LLM:
-
-    >>> from rag7 import init_agent
-    >>> rag = init_agent("docs")
-
-    OpenAI + Qdrant + Cohere reranker:
-
-    >>> rag = init_agent(
-    ...     "my-collection",
-    ...     model="openai:gpt-5.4",
-    ...     backend="qdrant",
-    ...     backend_url="http://localhost:6333",
-    ...     reranker="cohere",
-    ... )
-
-    Anthropic + Azure AI Search (native vectorisation):
-
-    >>> rag = init_agent(
-    ...     "my-index",
-    ...     model="anthropic:claude-sonnet-4-6",
-    ...     gen_model="anthropic:claude-opus-4-6",
-    ...     backend="azure",
-    ...     backend_url="https://my-search.search.windows.net",
-    ...     reranker="huggingface",
-    ...     auto_strategy=True,
-    ... )
-
-    Local Ollama + ChromaDB + local HuggingFace reranker:
-
-    >>> rag = init_agent(
-    ...     "docs",
-    ...     model="ollama:llama3",
-    ...     backend="chroma",
-    ...     reranker="huggingface",
-    ...     reranker_model="cross-encoder/ms-marco-MiniLM-L-6-v2",
-    ... )
-    """
     from .core import AgenticRAG
 
     resolved_backend: Any = None
@@ -317,8 +208,6 @@ def init_agent(
     if resolved_reranker is not None:
         kwargs["reranker"] = resolved_reranker
 
-    # Auto-discover RAGConfig (rag7.config.toml > pyproject.toml > env >
-    # defaults) unless the caller already passed one in kwargs.
     if "config" not in kwargs:
         from .config import RAGConfig
 

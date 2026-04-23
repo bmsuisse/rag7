@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import math
 import os
@@ -24,7 +23,7 @@ from langchain_core.runnables.config import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-from . import _cache
+from . import _cache, prompts
 from .backend import (
     _ACTIVE_COLLECTIONS,
     InMemoryBackend,
@@ -34,6 +33,7 @@ from .backend import (
 )
 from .models import (
     AnswerGrade,
+    CloseMatchKeep,
     CollectionIntent,
     ConversationTurn,
     FilterIntent,
@@ -86,31 +86,33 @@ _CATEGORY_FIELD_PATTERN = re.compile(
 )
 
 
-def _auto_cache_path(schema_sig: str) -> "os.PathLike[str]":
+def _filters_cache_path(schema_sig: str) -> "os.PathLike[str]":
     from pathlib import Path
 
     base = Path.home() / ".cache" / "rag7"
     base.mkdir(parents=True, exist_ok=True)
-    return base / f"auto_{schema_sig}.json"
+    return base / f"filters-v1_{schema_sig}.json"
 
 
-def _auto_cache_load(schema_sig: str) -> dict[str, Any] | None:
+def _filters_cache_load(schema_sig: str) -> dict[str, list[str]] | None:
     try:
+        import json as _json
         from pathlib import Path
 
-        p = Path(_auto_cache_path(schema_sig))
+        p = Path(_filters_cache_path(schema_sig))
         if not p.is_file():
             return None
-        return json.loads(p.read_text())
+        return _json.loads(p.read_text())
     except Exception:
         return None
 
 
-def _auto_cache_save(schema_sig: str, config: dict[str, Any]) -> None:
+def _filters_cache_save(schema_sig: str, values: dict[str, list[str]]) -> None:
     try:
+        import json as _json
         from pathlib import Path
 
-        Path(_auto_cache_path(schema_sig)).write_text(json.dumps(config, indent=2))
+        Path(_filters_cache_path(schema_sig)).write_text(_json.dumps(values, indent=2))
     except Exception:
         pass
 
@@ -435,6 +437,10 @@ def _detect_index_signals(
 
 class AgenticRAG:
     @staticmethod
+    def _llm_seed() -> int:
+        return int(os.getenv("RAG_LLM_SEED", "42"))
+
+    @staticmethod
     def _default_llm(
         *,
         timeout: int = 30,
@@ -447,19 +453,21 @@ class AgenticRAG:
             )
             return AzureChatOpenAI(  # type: ignore[call-arg]
                 azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
-                azure_deployment=deploy,
-                api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-12-01-preview"),
-                api_key=os.getenv("AZURE_OPENAI_API_KEY"),
+                azure_deployment=deploy,  # ty: ignore[unknown-argument]
+                api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-12-01-preview"),  # ty: ignore[unknown-argument]
+                api_key=os.getenv("AZURE_OPENAI_API_KEY"),  # ty: ignore[unknown-argument]
                 temperature=0,
+                seed=AgenticRAG._llm_seed(),
                 request_timeout=timeout,  # type: ignore[call-arg]
             )
 
         from langchain_openai import ChatOpenAI
 
         return ChatOpenAI(  # type: ignore[call-arg]
-            model=os.getenv("OPENAI_MODEL", "gpt-5.4"),
-            api_key=os.getenv("OPENAI_API_KEY"),
+            model=os.getenv("OPENAI_MODEL", "gpt-5.4"),  # ty: ignore[unknown-argument]
+            api_key=os.getenv("OPENAI_API_KEY"),  # ty: ignore[unknown-argument]
             temperature=0,
+            seed=AgenticRAG._llm_seed(),
             request_timeout=timeout,  # type: ignore[call-arg]
         )
 
@@ -473,19 +481,21 @@ class AgenticRAG:
             )
             return AzureChatOpenAI(  # type: ignore[call-arg]
                 azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
-                azure_deployment=deploy,
-                api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-12-01-preview"),
-                api_key=os.getenv("AZURE_OPENAI_API_KEY"),
+                azure_deployment=deploy,  # ty: ignore[unknown-argument]
+                api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-12-01-preview"),  # ty: ignore[unknown-argument]
+                api_key=os.getenv("AZURE_OPENAI_API_KEY"),  # ty: ignore[unknown-argument]
                 temperature=0,
+                seed=AgenticRAG._llm_seed(),
                 request_timeout=60,  # type: ignore[call-arg]
             )
 
         from langchain_openai import ChatOpenAI
 
         return ChatOpenAI(  # type: ignore[call-arg]
-            model=os.getenv("OPENAI_MODEL", "gpt-5.4"),
-            api_key=os.getenv("OPENAI_API_KEY"),
+            model=os.getenv("OPENAI_MODEL", "gpt-5.4"),  # ty: ignore[unknown-argument]
+            api_key=os.getenv("OPENAI_API_KEY"),  # ty: ignore[unknown-argument]
             temperature=0,
+            seed=AgenticRAG._llm_seed(),
             request_timeout=60,  # type: ignore[call-arg]
         )
 
@@ -496,7 +506,7 @@ class AgenticRAG:
         if spec.startswith("azure:"):
             spec = "azure_openai:" + spec.split(":", 1)[1]
 
-        kwargs: dict[str, Any] = {"temperature": 0}
+        kwargs: dict[str, Any] = {"temperature": 0, "seed": AgenticRAG._llm_seed()}
         if spec.startswith("azure_openai:"):
             kwargs.update(
                 azure_deployment=spec.split(":", 1)[1],
@@ -589,7 +599,6 @@ class AgenticRAG:
         base_filter: str | None = None,
         rerank_chars: int | None = None,
         hyde_min_words: int | None = None,
-        hyde_style_hint: str = "",
         auto_strategy: bool = True,
         group_field: str = "",
         name_field: str = "",
@@ -651,7 +660,6 @@ class AgenticRAG:
         self.fusion: Literal["rrf", "dbsf"] = fusion or os.getenv("RAG_FUSION", "rrf")  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
         self.instructions = instructions
         self.embed_fn = _align_embed_fn_with_backend(embed_fn, self.backend)
-        self.hyde_style_hint = hyde_style_hint
         self.group_field = group_field
         self.name_field = name_field
         self.category_fields = (
@@ -743,11 +751,14 @@ class AgenticRAG:
             self._enable_final_grade = config.enable_final_grade
             self._final_grade_threshold = config.final_grade_threshold
             self._enable_swarm_grade = config.enable_swarm_grade
+            self._enable_close_match_grader = bool(config.enable_close_match_grader)
             self._rerank_timeout_s = config.rerank_timeout_s
             self._llm_timeout_s = config.llm_timeout_s
             self.max_iter = config.max_iter
             self.n_swarm_queries = config.n_swarm_queries
             self.rerank_chars = config.rerank_chars
+            self._custom_instructions: str = config.custom_instructions or ""
+            self._preview_chars: int = config.preview_chars
         else:
             self._rerank_cap_multiplier = float(
                 os.getenv("RAG_RERANK_CAP_MULTIPLIER", "2.0")
@@ -788,19 +799,23 @@ class AgenticRAG:
             self._enable_final_grade = False
             self._final_grade_threshold = 0.7
             self._enable_swarm_grade = False
+            self._enable_close_match_grader = bool(
+                int(os.getenv("RAG_ENABLE_CLOSE_MATCH_GRADER", "1"))
+            )
             self._rerank_timeout_s = 30.0
             self._llm_timeout_s = 60.0
             self._name_field_boost_max: float = float(
                 os.getenv("RAG_NAME_FIELD_BOOST_MAX", "0.1")
             )
+            self._preview_chars: int = int(os.getenv("RAG_PREVIEW_CHARS", "1500"))
 
-        self._domain_hint: str = ""
+        if not hasattr(self, "_custom_instructions"):
+            self._custom_instructions = ""
         self._field_values_cache: dict = {}
-
-        self._preview_chars: int = int(os.getenv("RAG_PREVIEW_CHARS", "400"))
+        self._filter_values: dict[str, list[str]] = {}
 
         if auto_strategy:
-            self._auto_configure(override_hyde_min_words=hyde_min_words is None)
+            self._auto_init_filters()
 
         self._index_config = self.backend.get_index_config()
 
@@ -832,6 +847,9 @@ class AgenticRAG:
         self._product_code_chain = _ck(
             self._llm, "product-code"
         ).with_structured_output(ProductCodeQuery, method="json_schema")
+        self._close_match_chain = _ck(
+            self._grader_llm, "close-match"
+        ).with_structured_output(CloseMatchKeep, method="json_schema")
 
         self._toolset = RAGToolset(self)
         self._tools = self._toolset.as_tools()
@@ -859,7 +877,14 @@ class AgenticRAG:
         )
         self.filter = value
 
-    def _auto_configure(self, override_hyde_min_words: bool = True) -> None:
+    def _auto_init_filters(self) -> None:
+        """Deterministic init: schema inference + filter-value discovery.
+
+        Samples documents once, widens rerank_chars if docs are long, infers
+        name/group fields, then discovers filterable attributes and a small
+        set of distinct values per field so the filter-intent agent knows
+        what filters are available.
+        """
         try:
             sample = self.backend.sample_documents(
                 limit=15,
@@ -867,7 +892,6 @@ class AgenticRAG:
             )
             if not sample:
                 return
-            previews: list[str] = []
             max_doc_chars = 0
             for h in sample[:5]:
                 items = [
@@ -875,7 +899,6 @@ class AgenticRAG:
                     for k, v in h.items()
                     if k not in _SKIP_FIELDS and v and isinstance(v, (str, int, float))
                 ]
-                previews.append(str({k: v[:120] for k, v in items}))
                 max_doc_chars = max(max_doc_chars, sum(len(v) for _, v in items))
 
             if max_doc_chars > self.rerank_chars:
@@ -884,99 +907,53 @@ class AgenticRAG:
             self._infer_name_and_group_fields(sample)
 
             schema_sig = self._schema_signature(sample)
-            cached = _auto_cache_load(schema_sig)
+            cached = _filters_cache_load(schema_sig)
             if cached is not None:
-                config = cached
-                source = "cache"
-            else:
-                result = self._llm.invoke(
-                    [
-                        SystemMessage(
-                            "Analyze these sample documents and return ONLY a JSON "
-                            "object (no markdown) with the following keys:\n"
-                            "- hyde_style_hint: str — one short phrase for HyDE "
-                            "prompt, e.g. 'German legal ruling', 'product spec "
-                            "sheet', 'customer address record', 'medical Q&A'.\n"
-                            "- hyde_min_words: int 3–12 — min query words to "
-                            "trigger HyDE. Lower (3–5) for factual Q&A / legal. "
-                            "Higher (8–12) for keyword search / products.\n"
-                            "- domain_hint: str — 1–2 sentences describing the "
-                            "content, identifiers/codes, language, and any "
-                            "query preprocessing tips specific to this domain.\n"
-                            "- semantic_ratio: float 0.3–0.9 — BM25 vs vector "
-                            "balance. Lower (0.3–0.5) for precise keyword/SKU "
-                            "search. Higher (0.6–0.9) for prose, Q&A, synonym-"
-                            "heavy content.\n"
-                            "- fusion: 'rrf' | 'dbsf' — rank fusion strategy. "
-                            "'rrf' is stable default; 'dbsf' normalises score "
-                            "distributions and often wins when score ranges "
-                            "differ (vector vs BM25 scale mismatch).\n"
-                            "- enable_filter_intent: bool — true if schema has "
-                            "real filterable fields (supplier, category, year) "
-                            "that users would naturally mention in questions. "
-                            "False for pure text blobs where filter detection "
-                            "is just noise.\n"
-                            "- enable_preprocess_llm: bool — true if queries "
-                            "in this domain benefit from LLM rewrite (natural "
-                            "language questions, long/complex Q&A). False for "
-                            "short keyword/product-name lookups where rewrite "
-                            "usually introduces noise.\n"
-                            "- short_query_threshold: int 3–8 — word count "
-                            "below which we skip LLM query preprocessing. "
-                            "Lower (3–4) for short keyword catalogs, higher "
-                            "(6–8) for natural-language Q&A corpora.\n"
-                            "- preview_chars: int 200–2000 — how many chars "
-                            "of each document to feed the quality-gate and "
-                            "rewrite-snippet LLM calls. Short product rows "
-                            "→ 200–400. Long catalog pages / legal docs / "
-                            "articles → 1000–2000. Based on what a reader "
-                            "would actually need to judge relevance."
-                        ),
-                        HumanMessage("Sample documents:\n" + "\n---\n".join(previews)),
-                    ]
-                )
-                config = json.loads(str(result.content).strip())
-                _auto_cache_save(schema_sig, config)
-                source = "llm"
+                self._filter_values = {k: list(v) for k, v in cached.items()}
+                return
 
-            if "hyde_style_hint" in config:
-                self.hyde_style_hint = str(config["hyde_style_hint"])
-            if "hyde_min_words" in config and override_hyde_min_words:
-                self.hyde_min_words = int(config["hyde_min_words"])
-            if "domain_hint" in config:
-                self._domain_hint = str(config["domain_hint"])
-            if "semantic_ratio" in config:
-                self.semantic_ratio = float(config["semantic_ratio"])
-            if "fusion" in config and config["fusion"] in ("rrf", "dbsf"):
-                self.fusion = config["fusion"]
+            try:
+                filterable = self.backend.get_index_config().filterable_attributes
+            except Exception:
+                filterable = []
 
-            if self.semantic_ratio >= 0.35:
-                self.fusion = "dbsf"
-            if "enable_filter_intent" in config:
-                self._enable_filter_intent = bool(config["enable_filter_intent"])
-            if "enable_preprocess_llm" in config:
-                self._enable_preprocess_llm = bool(config["enable_preprocess_llm"])
-            if "enable_reasoning" in config:
-                self._enable_reasoning = bool(config["enable_reasoning"])
-            if "short_query_threshold" in config:
-                self._short_query_threshold = int(config["short_query_threshold"])
-            if "preview_chars" in config:
-                try:
-                    self._preview_chars = max(
-                        200, min(4000, int(config["preview_chars"]))
-                    )
-                except (ValueError, TypeError):
-                    pass
+            if not filterable:
+                self._filter_values = {}
+                _filters_cache_save(schema_sig, {})
+                return
 
-            self._short_query_sort_tokens = True
-            label = (
-                ",".join(sorted(self.collections.keys()))
-                if self.collections
-                else self.index
-            )
-            print(f"  [{label}] strategy ({source}): {config}")
+            # One extra broader sample to improve coverage of distinct values.
+            try:
+                extra = self.backend.sample_documents(limit=200, filter_expr=self.filter)
+            except Exception:
+                extra = []
+            combined = list(sample) + list(extra)
+
+            discovered: dict[str, list[str]] = {}
+            for attr in filterable:
+                seen: set[str] = set()
+                values: list[str] = []
+                for h in combined:
+                    v = h.get(attr)
+                    if v is None or v == "":
+                        continue
+                    for item in v if isinstance(v, list) else [v]:
+                        s = str(item)
+                        if s and s not in seen:
+                            seen.add(s)
+                            values.append(s)
+                            if len(values) >= 20:
+                                break
+                    if len(values) >= 20:
+                        break
+                if values:
+                    discovered[attr] = sorted(values)[:20]
+
+            self._filter_values = discovered
+            _filters_cache_save(schema_sig, discovered)
         except Exception as e:
-            print(f"  [{self.index}] auto-strategy failed ({e}), using defaults")
+            self._filter_values = {}
+            print(f"  [{self.index}] filter-value discovery failed ({e}), using empty dict")
 
     def _infer_name_and_group_fields(self, sample: list[dict]) -> None:
         if self.name_field and self.group_field:
@@ -1112,23 +1089,17 @@ class AgenticRAG:
 
     @_llm_retry
     async def _ahypothetical_doc(self, query: str) -> str:
-        cached = _cache.load("hyde-v1", self.hyde_style_hint or "", query)
+        cached = _cache.load("hyde-v2", "", query)
         if cached:
             return str(cached)
-        style = f" ({self.hyde_style_hint})" if self.hyde_style_hint else ""
         result = await self._llm.ainvoke(
             [
-                self._sys(
-                    f"Write 2-4 sentences from a relevant document{style}. "
-                    "Use domain terminology, specific identifiers, citations, "
-                    "or technical terms likely present in the source. "
-                    "No questions — write as extracted text."
-                ),
+                self._sys(prompts.hyde_system()),
                 HumanMessage(query),
             ]
         )
         text = str(result.content).strip() or query
-        _cache.save("hyde-v1", self.hyde_style_hint or "", query, value=text)
+        _cache.save("hyde-v2", "", query, value=text)
         return text
 
     def _cached_batch_search(self, requests: "list[Any]") -> "list[list[dict]]":
@@ -1193,7 +1164,7 @@ class AgenticRAG:
             self._trace(new, "preprocess", t0, path="disabled", query=raw)
             return new
 
-        cached = _cache.load("preprocess-v5", self._domain_hint or "", state.question)
+        cached = _cache.load("preprocess-v8", "", state.question)
         if cached:
             try:
                 result = SearchQuery.model_validate(cached)
@@ -1221,49 +1192,14 @@ class AgenticRAG:
                 SearchQuery,
                 await self._search_query_chain.ainvoke(
                     [
-                        self._sys(
-                            "Extract 2-5 concise search keywords from the user's question. "
-                            "Return ONLY essential nouns, entities, and technical terms. "
-                            "Omit question words, common verbs, and stop words (e.g. find, search, what, how, give me). "
-                            "Correct obvious spelling mistakes in product names, brand names, and German/Italian "
-                            "words to their standard form. "
-                            "Also restore German umlauts when users omit them: 'oe'→'ö', 'ae'→'ä', 'ue'→'ü', "
-                            "or when a bare vowel clearly substitutes an umlaut "
-                            "(e.g. 'bieroffner'→'Bieröffner', 'Klosetsitz'→'Klosettsitz'). "
-                            "Preserve alphanumeric codes and technical identifiers exactly (e.g. DHR171RTJ, M12, SDS-Plus, 18V). "
-                            + (
-                                f"Domain context: {self._domain_hint} "
-                                if self._domain_hint
-                                else ""
-                            )
-                            + "Also set 'variants': 2-3 more specific alternative keyword phrasings — "
-                            "use technical names, codes, or narrower terminology for the same concept. "
-                            "Variants must use correctly-spelled standard forms; never echo misspelled words from the input. "
-                            "Avoid broader synonyms. Keep keywords in the same language as the query. "
-                            "Also set 'semantic_ratio' (0.0-1.0): how much to weight semantic/vector "
-                            "search vs keyword/BM25. "
-                            "- Exact identifiers, codes, names → 0.1-0.2 (BM25 excels) "
-                            "- Specific nouns, mixed queries → 0.3-0.5 (balanced) "
-                            "- Intent/need-based queries → 0.6-0.8 (semantic helps) "
-                            "- Abstract/conceptual questions → 0.7-0.9 (semantic dominant) "
-                            "Also set 'fusion' ('rrf' or 'dbsf'): how to fuse multi-arm search results. "
-                            "- 'rrf': Reciprocal Rank Fusion — rank-based, best for keyword-heavy queries. "
-                            "- 'dbsf': Distribution-Based Score Fusion — score-normalised, best for semantic queries. "
-                            "Also set 'alternative_to' (string or null): if the user asks for alternatives, "
-                            "replacements, substitutes, or competitors for a SPECIFIC named product/item, "
-                            "set this to the product name/identifier. "
-                            "Trigger words: 'alternative', 'ersatz', 'replacement', 'substitut', 'competitor', "
-                            "'statt', 'anstelle', 'remplacer', 'remplaçant', 'à la place de'. "
-                            "The query should then contain the CATEGORY/TYPE terms (what kind of product it is), "
-                            "NOT the specific product name."
-                        ),
+                        self._sys(prompts.preprocess_system()),
                         HumanMessage(state.question),
                     ]
                 ),
             )
             _cache.save(
-                "preprocess-v5",
-                self._domain_hint or "",
+                "preprocess-v8",
+                "",
                 state.question,
                 value=result.model_dump(),
             )
@@ -1410,13 +1346,7 @@ class AgenticRAG:
         try:
             resp = await self._llm.ainvoke(
                 [
-                    self._sys(
-                        "Rewrite the user's follow-up question as a standalone "
-                        "search query, using prior conversation for context. "
-                        "Preserve exact codes, numbers, product names. If the "
-                        "question is already standalone, return it unchanged. "
-                        "Reply with ONLY the rewritten query — no prose."
-                    ),
+                    self._sys(prompts.CONTEXTUALIZE),
                     HumanMessage(
                         f"Previous question: {last.question}\n"
                         f"Previous answer (first 300 chars): {last.answer[:300]}\n"
@@ -1481,11 +1411,7 @@ class AgenticRAG:
                     MultiQuery,
                     await self._multi_query_chain.ainvoke(
                         [
-                            self._sys(
-                                f"Generate {self.n_swarm_queries} distinct search query variants for the question. "
-                                "Each should use different keywords, synonyms, or angles to maximise recall. "
-                                f"Return JSON with a 'queries' list of {self.n_swarm_queries} strings."
-                            ),
+                            self._sys(prompts.multi_query_swarm(self.n_swarm_queries)),
                             HumanMessage(state.question),
                         ]
                     ),
@@ -1960,11 +1886,7 @@ class AgenticRAG:
             f"[{i + 1}] {d.page_content}"
             for i, d in enumerate(state.documents[: self.top_k])
         )
-        sys_content = (
-            "Answer using only the provided context. "
-            "Cite sources inline using [n] numbers that match the context blocks. "
-            "Say so if the context is insufficient."
-        )
+        sys_content = prompts.ANSWER_SYSTEM
         if state.grader_feedback:
             sys_content += (
                 f"\n\nSearch guidance for this attempt: {state.grader_feedback}"
@@ -2008,29 +1930,17 @@ class AgenticRAG:
             self._trace(new, "rewrite", t0, path="swarm", docs=len(new.documents))
             return new
 
+        feedback: str | None = None
+        top_snippet: str | None = None
         if state.grader_feedback and state.documents:
-            prompt = (
-                "The previous search did not return the right products. "
-                f'Grader feedback: "{state.grader_feedback}". '
-                f'Previous query: "{state.query}". '
-                "Rewrite the query following the feedback. "
-                "Return a precise query of 1-4 keywords AND 2-3 spelling/form variants "
-                "(e.g. with/without umlaut, compound vs. spaced). No filler words."
-            )
+            feedback = state.grader_feedback
         elif state.quality_ok is False and state.documents:
             top_snippet = state.documents[0].page_content[: self._preview_chars]
-            prompt = (
-                "The search returned documents but they are NOT relevant to the question. "
-                f'Previous query: "{state.query}". '
-                f'Top result snippet: "{top_snippet}...". '
-                "Rewrite using different keywords, synonyms, or a narrower angle. "
-                "Return only 1-4 keywords — no filler words."
-            )
-        else:
-            prompt = (
-                "The previous search returned NO results. Rewrite the query using different words, "
-                "synonyms, or a broader term. Return only 1-3 short keywords — no filler."
-            )
+        prompt = prompts.rewrite_query(
+            previous_query=state.query,
+            feedback=feedback,
+            top_snippet=top_snippet,
+        )
 
         try:
             rewrite_coro = self._search_query_chain.ainvoke(
@@ -2127,20 +2037,7 @@ class AgenticRAG:
                 ReasoningVerdict,
                 await self._reasoning_chain.ainvoke(
                     [
-                        self._sys(
-                            "You are a retrieval result judge. Given a user question and "
-                            "the top retrieved documents, decide:\n"
-                            "1. Which documents (by 1-based index) are clearly IRRELEVANT "
-                            "or VIOLATE the query intent (e.g., the user asked for "
-                            "alternatives to product X but the results contain X itself).\n"
-                            "   List their indices in `dominated_by`.\n"
-                            "2. If ALL documents are poor, suggest a `rewritten_query` "
-                            "that would find better results. Otherwise leave it null.\n"
-                            "3. Provide brief `reasoning` for your verdict.\n\n"
-                            "Be strict: only flag documents that clearly miss the intent. "
-                            "If results look reasonable, return an empty `dominated_by`."
-                            f"{intent_hint}"
-                        ),
+                        self._sys(prompts.reasoning_verdict(intent_hint)),
                         HumanMessage(
                             f"Question: {state.question}\n\n"
                             f"Retrieved documents:\n{snippets}"
@@ -2171,6 +2068,58 @@ class AgenticRAG:
             path="fired",
             dropped=len(verdict.dominated_by),
             rewrite=bool(verdict.rewritten_query),
+        )
+        return new
+
+    async def _aclose_match_grade(self, state: RAGState) -> RAGState:
+        t0 = time.perf_counter()
+        if not self._enable_close_match_grader or not state.documents:
+            self._trace(state, "close_match", t0, path="skip")
+            return state
+        top_n = min(self.rerank_top_n, len(state.documents))
+        if top_n <= 1:
+            self._trace(state, "close_match", t0, path="skip_too_few")
+            return state
+        snippets = "\n\n".join(
+            f"[{i + 1}] {d.page_content[: self._preview_chars]}"
+            for i, d in enumerate(state.documents[:top_n])
+        )
+        try:
+            verdict = cast(
+                CloseMatchKeep,
+                await self._close_match_chain.ainvoke(
+                    [
+                        self._sys(prompts.close_match()),
+                        HumanMessage(
+                            f"Query: {state.query}\n\n"
+                            f"Retrieved documents:\n{snippets}"
+                        ),
+                    ]
+                ),
+            )
+        except Exception as e:
+            self._trace(state, "close_match", t0, path="error", error=type(e).__name__)
+            return state
+        keep_set = set(verdict.keep)
+        if not keep_set:
+            # Grader succeeded and said keep none → honest "no relevant docs".
+            # Better than showing brand-only matches. Only LLM errors fail-open
+            # (handled by the except-branch above which returns state unchanged).
+            new = state.model_copy(update={"documents": []})
+            self._trace(new, "close_match", t0, path="dropped_all", dropped=top_n)
+            return new
+        kept = [d for i, d in enumerate(state.documents) if (i + 1) in keep_set]
+        if verdict.reasoning:
+            for d in kept:
+                d.metadata["_grader_reasoning"] = verdict.reasoning
+        new = state.model_copy(update={"documents": kept})
+        self._trace(
+            new,
+            "close_match",
+            t0,
+            path="fired",
+            kept=len(kept),
+            dropped=top_n - len(kept),
         )
         return new
 
@@ -2222,15 +2171,7 @@ class AgenticRAG:
                 QualityAssessment,
                 await self._quality_chain.ainvoke(
                     [
-                        self._sys(
-                            "You are a retrieval quality judge. "
-                            "Given a question and the top-5 retrieved document snippets, "
-                            "decide if the documents are sufficient to answer the question. "
-                            "Return sufficient=true if at least one document directly addresses the question. "
-                            "Return sufficient=false if the documents are off-topic, too vague, or clearly wrong. "
-                            "For 'alternative to X' or 'not X' queries, documents that are DIFFERENT from X "
-                            "are correct — they should be rated sufficient if they are in the same product category."
-                        ),
+                        self._sys(prompts.QUALITY_GATE),
                         HumanMessage(
                             f"Question: {state.question}\n\nRetrieved snippets:\n{snippets}"
                         ),
@@ -2269,16 +2210,7 @@ class AgenticRAG:
                 AnswerGrade,
                 await self._grade_chain.ainvoke(
                     [
-                        self._sys(
-                            "You are a strict quality grader for a product search assistant. "
-                            "Given the user question, retrieved document snippets, and generated answer, "
-                            "decide if the answer correctly identifies the product(s) the user was looking for. "
-                            "sufficient=true only if the answer names or describes the right product. "
-                            "If NOT sufficient, write a specific, actionable suggestion — "
-                            "e.g. 'Search for Rothenberger Rohrzange, the brand was misspelled' or "
-                            "'User wants a short hammer handle (Hammerstiel), not a complete hammer'. "
-                            "Keep suggestion under 30 words. confidence: 1.0=definitely correct, 0.0=clearly wrong."
-                        ),
+                        self._sys(prompts.FINAL_GRADE),
                         HumanMessage(
                             f"Question: {state.question}\n\n"
                             f"Retrieved snippets:\n{snippets}\n\n"
@@ -2325,15 +2257,7 @@ class AgenticRAG:
                 AnswerGrade,
                 await self._grade_chain.ainvoke(
                     [
-                        self._sys(
-                            "You are a strict quality grader for a retrieval system. "
-                            "Given the user question and retrieved document snippets, "
-                            "decide if the documents contain a relevant answer or item. "
-                            "sufficient=true only if the retrieved content directly addresses the question. "
-                            "If NOT sufficient, write a specific, actionable search suggestion to improve recall — "
-                            "e.g. correct a misspelling, suggest a synonym, or clarify the intent. "
-                            "Keep suggestion under 30 words. confidence: 1.0=definitely relevant, 0.0=clearly wrong."
-                        ),
+                        self._sys(prompts.GRADE_DOCS),
                         HumanMessage(
                             f"Question: {question}\n\nRetrieved document snippets:\n{snippets}"
                         ),
@@ -2375,12 +2299,7 @@ class AgenticRAG:
                     MultiQuery,
                     await self._multi_query_chain.ainvoke(
                         [
-                            self._sys(
-                                f"Generate {self.n_swarm_queries} distinct search query variants "
-                                "for the question. Each should use different keywords, synonyms, "
-                                "or angles to maximise recall. "
-                                f"Return JSON with a 'queries' list of {self.n_swarm_queries} strings."
-                            ),
+                            self._sys(prompts.multi_query_swarm(self.n_swarm_queries)),
                             HumanMessage(seed),
                         ]
                     ),
@@ -2819,7 +2738,7 @@ class AgenticRAG:
             self._tools,
             system_prompt=system_prompt,
             store=self._memory_store,
-            middleware=[
+            middleware=[  # ty: ignore[invalid-argument-type]
                 ToolCallLimitMiddleware(run_limit=10, exit_behavior="end"),  # type: ignore[arg-type]
                 ToolRetryMiddleware(
                     max_retries=5,
@@ -2882,20 +2801,7 @@ class AgenticRAG:
                 ProductCodeQuery,
                 await self._product_code_chain.ainvoke(
                     [
-                        self._sys(
-                            "Detect if the user query is asking to look up a product by a specific "
-                            "numeric code such as an EAN, GTIN, barcode, article number, or internal ID.\n"
-                            "Examples that ARE product-code queries:\n"
-                            "  'EAN 9002886001325' → code='9002886001325'\n"
-                            "  'Artikel-Nr. 12345' → code='12345'\n"
-                            "  'numéro d'article 4011905123' → code='4011905123'\n"
-                            "  'codice articolo 7612345678901' → code='7612345678901'\n"
-                            "  'article number 0600753042' → code='0600753042'\n"
-                            "Examples that are NOT product-code queries:\n"
-                            "  'Bosch Winkelschleifer 125mm' → is_product_code=false\n"
-                            "  'ich brauche einen Hammer' → is_product_code=false\n"
-                            "Return only the numeric digits of the code (strip any prefix words)."
-                        ),
+                        self._sys(prompts.PRODUCT_CODE),
                         HumanMessage(query),
                     ]
                 ),
@@ -2939,20 +2845,27 @@ class AgenticRAG:
         elif not (has_strong_signal or has_weak_capital_signal or has_filter_word):
             return FilterIntent(field=None, value="", operator="")
 
-        cached = _cache.load("filter-intent-v6", tuple(filterable), question)
+        cached = _cache.load("filter-intent-v7", tuple(filterable), question)
         if cached:
             try:
                 return FilterIntent.model_validate(cached)
             except Exception:
                 pass
 
-        loop = asyncio.get_running_loop()
-        field_values = await loop.run_in_executor(
-            None, self._sample_field_values, filterable
-        )
+        if self._filter_values:
+            field_values: dict[str, list] = {
+                field: list(self._filter_values.get(field, []))
+                for field in filterable
+                if self._filter_values.get(field)
+            }
+        else:
+            loop = asyncio.get_running_loop()
+            field_values = await loop.run_in_executor(
+                None, self._sample_field_values, filterable
+            )
 
         values_block = "\n".join(
-            f"  {field}: {vals[:30]}" for field, vals in field_values.items()
+            f"  {field}: {vals[:10]}" for field, vals in field_values.items()
         )
 
         try:
@@ -2961,37 +2874,11 @@ class AgenticRAG:
                 await self._filter_intent_chain.ainvoke(
                     [
                         self._sys(
-                            f"You help build filter expressions for a search backend.\n"
-                            f"Filterable fields in this index: {filterable}\n\n"
-                            f"Sample values per field:\n{values_block}\n\n"
-                            "TASK: Detect if the question mentions a SPECIFIC named entity "
-                            "(brand, supplier, company, category, boolean flag, etc.) that should "
-                            "be used as a filter.\n\n"
-                            "RULES:\n"
-                            "- If a proper noun / brand name appears that likely maps to a name field "
-                            "(e.g. supplier_name, brand_name, company), use CONTAINS with that name — "
-                            "even if the exact value is not in the samples above.\n"
-                            "- IMPORTANT: In German 'von' means 'by/from'. The word AFTER 'von' is the brand/supplier. "
-                            "Exception: if the word after 'von' is clearly a product type (like Schaumpistole, "
-                            "Bieröffner, Werkzeug, Maschine), then the brand is the proper noun BEFORE 'von'.\n"
-                            "  Example: 'Schaumpistole von ProOne' → brand=ProOne (after 'von'), correct.\n"
-                            "  Example: 'ProOne von Schaumpistole' → 'Schaumpistole' is a product type, "
-                            "so the brand is 'ProOne' (before 'von').\n"
-                            "- For boolean fields (is_own_brand, active, etc.), use = with true/false.\n"
-                            "- For exact IDs or codes, use =.\n"
-                            "- For multiple values, use IN.\n"
-                            "- EXCLUSION: If the question says 'nicht'/'not'/'aber nicht'/'sans'/'pas de'/"
-                            "'exclude'/'except', use NOT_CONTAINS to EXCLUDE that entity.\n"
-                            "  For multi-brand exclusion ('nicht X oder Y'), put the first brand in value "
-                            "and additional brands in extra_excludes.\n"
-                            "  Example: 'Mörtel nicht Weber' → field=supplier_name, value=Weber, operator=NOT_CONTAINS\n"
-                            "  Example: 'nicht Sakret oder Fixit' → value=Sakret, extra_excludes=[Fixit]\n"
-                            "- 'Alternative zu X' means 'find similar products but not X itself'. "
-                            "Use NOT_CONTAINS on the name field to exclude the queried product.\n"
-                            "  Example: 'Alternative zu PCI Polyfix' → field=article_name, value=PCI Polyfix, operator=NOT_CONTAINS\n"
-                            "- If NO specific entity is named (broad/generic query), return field=null, value='', operator=''.\n"
-                            "Operators: CONTAINS (partial match), = (exact), IN (multiple values), "
-                            "NOT_CONTAINS (exclude partial match), != (exclude exact)"
+                            prompts.filter_intent(
+                                filterable,
+                                values_block,
+                                self._custom_instructions,
+                            )
                         ),
                         HumanMessage(question),
                     ]
@@ -2999,7 +2886,7 @@ class AgenticRAG:
             )
             result = self._patch_exclusion_intent(question, result, filterable)
             _cache.save(
-                "filter-intent-v6",
+                "filter-intent-v7",
                 tuple(filterable),
                 question,
                 value=result.model_dump(),
@@ -3080,16 +2967,7 @@ class AgenticRAG:
                 CollectionIntent,
                 await self._select_collection_chain.ainvoke(
                     [
-                        self._sys(
-                            "Pick the collections most likely to contain the answer.\n"
-                            f"Available collections:\n{descriptions}\n\n"
-                            "Return JSON with a 'collections' list containing ONLY names "
-                            "from the list above.\n"
-                            "- Prefer the minimum set that covers the question.\n"
-                            "- If the question spans multiple topics, include all relevant.\n"
-                            "- If unsure, include all candidates (better recall than miss).\n"
-                            "- Never invent names not in the list."
-                        ),
+                        self._sys(prompts.collection_select(descriptions)),
                         HumanMessage(question),
                     ]
                 ),
@@ -3174,11 +3052,7 @@ class AgenticRAG:
                 RelevanceCheck,
                 await self._relevance_chain.ainvoke(
                     [
-                        self._sys(
-                            "Strictly judge if snippets DIRECTLY answer the question. "
-                            "Set makes_sense=true and confidence>=0.9 only if a snippet "
-                            "clearly contains the answer. Otherwise lower confidence."
-                        ),
+                        self._sys(prompts.RELEVANCE_CHECK),
                         HumanMessage(f"Question: {query}\n\nSnippets:\n{snippets}"),
                     ]
                 ),
@@ -3309,6 +3183,7 @@ class AgenticRAG:
                 else 0.0
             )
             if top_rerank >= 0.1:
+                state = await self._aclose_match_grade(state)
                 return state.query, self._truncate_low_score(state.documents, k)
 
         init = RAGState(question=query, query=query)
@@ -3426,6 +3301,7 @@ class AgenticRAG:
             ranked = self._pin_filter_top(state.documents, filter_docs, pin_to=1)
             if ranked is not state.documents:
                 state = state.model_copy(update={"documents": ranked})
+        state = await self._aclose_match_grade(state)
         return state.query, self._truncate_low_score(state.documents, k)
 
     def retrieve_documents(
@@ -3445,11 +3321,7 @@ class AgenticRAG:
             f"[{i + 1}] {d.page_content}" for i, d in enumerate(docs[: self.top_k])
         )
         messages: list = [
-            self._sys(
-                "Answer using only the provided context. "
-                "Cite sources inline using [n] numbers that match the context blocks. "
-                "Say so if the context is insufficient."
-            ),
+            self._sys(prompts.ANSWER_SYSTEM),
             HumanMessage(f"Context:\n{numbered}\n\nQuestion: {question}"),
         ]
         async for chunk in self._gen_llm.astream(messages):

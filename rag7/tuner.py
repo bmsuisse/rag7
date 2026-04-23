@@ -178,7 +178,7 @@ class RAGTuner:
                     "rerank_cap_multiplier", 1.5, 4.0
                 ),
                 semantic_ratio=trial.suggest_float("semantic_ratio", 0.3, 0.9),
-                fusion=trial.suggest_categorical("fusion", ["rrf", "dbsf"]),
+                fusion=trial.suggest_categorical("fusion", ["rrf", "dbsf"]),  # ty: ignore[invalid-argument-type]
                 hyde_min_words=_opt_int(trial, "hyde_min_words", 4, 12),
                 short_query_threshold=trial.suggest_int("short_query_threshold", 3, 8),
                 short_query_sort_tokens=trial.suggest_categorical(
@@ -197,6 +197,9 @@ class RAGTuner:
                 rerank_min_score=_opt_float(trial, "rerank_min_score", 0.05, 0.5),
                 name_field_boost_max=trial.suggest_float(
                     "name_field_boost_max", 0.0, 0.5
+                ),
+                boost_decay_sigma=trial.suggest_float(
+                    "boost_decay_sigma", 0.01, 0.15
                 ),
                 expert_threshold=_opt_float(trial, "expert_threshold", 0.05, 0.3),
                 enable_hyde=trial.suggest_categorical("enable_hyde", [True, False]),
@@ -259,6 +262,7 @@ class RAGTuner:
             "short_query_sort_tokens",
             "bm25_fallback_semantic_ratio",
             "name_field_boost_max",
+            "boost_decay_sigma",
             "enable_hyde",
             "enable_filter_intent",
             "enable_quality_gate",
@@ -333,8 +337,7 @@ class RAGTuner:
         baseline = global_config
 
         def objective(trial: "optuna.Trial") -> float:
-            config = RAGConfig(
-                **{
+            overrides: dict[str, Any] = {
                     **baseline.model_dump(),
                     "semantic_ratio": trial.suggest_float("semantic_ratio", 0.2, 0.9),
                     "retrieval_factor": trial.suggest_int("retrieval_factor", 2, 8),
@@ -380,7 +383,7 @@ class RAGTuner:
                         else None
                     ),
                 }
-            )
+            config = RAGConfig(**overrides)
             try:
                 result = asyncio.run(
                     asyncio.wait_for(

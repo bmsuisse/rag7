@@ -180,3 +180,6 @@ rag7.config.toml
 
 # Local benchmark artifacts
 /bench
+
+# Local eval cache (populated by dataset_builder / tuner)
+.rag7_eval_cache/

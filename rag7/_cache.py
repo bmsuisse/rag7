@@ -1,13 +1,3 @@
-"""Lightweight cache for LLM call results.
-
-Backends (auto-picked by env):
-- Postgres (if ``RAG7_CACHE_PG_URL`` or ``DATABASE_URL`` set + ``psycopg`` installed)
-- Disk (if ``RAG7_CACHE_DIR`` set) — JSON files
-- In-memory (default when cache enabled)
-
-Opt-in: set ``RAG7_CACHE=1`` (or a truthy value). Off by default.
-"""
-
 from __future__ import annotations
 
 import hashlib

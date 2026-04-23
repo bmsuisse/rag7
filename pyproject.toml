@@ -149,6 +149,7 @@ all = [
 
 [project.scripts]
 rag7 = "rag7.cli:main"
+rag7-dataset = "rag7.dataset_builder:_cli_main"
 
 [project.urls]
 Homepage = "https://github.com/bmsuisse/rag7"

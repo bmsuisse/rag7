@@ -13,7 +13,7 @@ from tenacity import (
     wait_exponential_jitter,
 )
 
-from .models import RerankResult
+from .models import RelevanceScore, RerankResult
 from .utils import _run_sync
 
 
@@ -23,11 +23,6 @@ def _is_rate_limit(exc: BaseException) -> bool:
 
 
 class CohereReranker:
-    """Cohere reranker — default when cohere is installed.
-
-    Works with both Cohere API and Azure Cohere deployments.
-    """
-
     def __init__(
         self,
         model: str | None = None,
@@ -97,23 +92,9 @@ class CohereReranker:
 
 
 class RerankersReranker:
-    """Bridge to the `rerankers` library by answer.ai.
-
-    Single interface for cross-encoders, ColBERT, RankGPT, Flashrank, and API models.
-    See: https://github.com/AnswerDotAI/rerankers
-
-    Requires: pip install rerankers  (or rerankers[transformers], rerankers[flashrank], etc.)
-
-    Examples:
-        RerankersReranker("cross-encoder/ms-marco-MiniLM-L-6-v2", model_type="cross-encoder")
-        RerankersReranker("colbert-ir/colbertv2.0", model_type="colbert")
-        RerankersReranker("flashrank", model_type="flashrank")
-        RerankersReranker("gpt-5.4-mini", model_type="rankgpt", api_key="...")
-    """
-
     def __init__(self, model: str, model_type: str | None = None, **kwargs: object):
         try:
-            from rerankers import Reranker  # type: ignore[import-untyped]
+            from rerankers import Reranker  # type: ignore[import-untyped]  # ty: ignore[unresolved-import]
         except ImportError as e:
             raise ImportError(
                 "rerankers is required for RerankersReranker. "
@@ -147,14 +128,6 @@ class RerankersReranker:
 
 
 class JinaReranker:
-    """Jina AI reranker — REST API, strong multilingual support.
-
-    Models: jina-reranker-v2-base-multilingual (default), jina-reranker-v1-base-en
-    API key: https://jina.ai (free tier available)
-
-    Requires: pip install httpx
-    """
-
     _API_URL = "https://api.jina.ai/v1/rerank"
 
     def __init__(
@@ -227,15 +200,6 @@ class JinaReranker:
 
 
 class HuggingFaceReranker:
-    """Cross-encoder reranker using a local HuggingFace model.
-
-    Runs entirely locally — no API key, no network calls after model download.
-    Default model: cross-encoder/ms-marco-MiniLM-L-6-v2 (fast, good quality).
-    For multilingual: cross-encoder/mmarco-mMiniLMv2-L12-H384-v1
-
-    Requires: pip install sentence-transformers
-    """
-
     def __init__(
         self,
         model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2",
@@ -276,12 +240,6 @@ class HuggingFaceReranker:
 
 
 class LLMReranker:
-    """LLM reranker — parallel per-doc scoring via asyncio.gather.
-
-    Use as an expert fallback on hard questions. Costs one LLM call per doc —
-    keep doc count small (top 10–15) and cap input size.
-    """
-
     def __init__(
         self,
         llm: BaseChatModel | None = None,
@@ -291,6 +249,11 @@ class LLMReranker:
         self._llm = llm
         self._doc_chars = doc_chars
         self._sem = asyncio.Semaphore(max_parallel)
+        self._score_chain = (
+            llm.with_structured_output(RelevanceScore, method="json_schema")
+            if llm is not None
+            else None
+        )
 
     def rerank(
         self,
@@ -321,14 +284,11 @@ class LLMReranker:
         return [RerankResult(index=i, relevance_score=s) for i, s in scored[:top_n]]
 
     async def _score(self, query: str, doc: str, idx: int) -> tuple[int, float]:
-        import re
-
-        if self._llm is None:
+        if self._score_chain is None:
             return idx, 0.0
         prompt = (
-            f"Rate the relevance of this document to the query on a scale 0.0-1.0.\n"
-            f"Query: {query}\n\nDocument: {doc[: self._doc_chars]}\n\n"
-            f"Return ONLY a single float between 0.0 and 1.0."
+            f"Rate relevance of this document to the query.\n"
+            f"Query: {query}\n\nDocument: {doc[: self._doc_chars]}"
         )
         async with self._sem:
             try:
@@ -339,28 +299,19 @@ class LLMReranker:
                     reraise=True,
                 ):
                     with attempt:
-                        resp = await self._llm.ainvoke([HumanMessage(prompt)])
-                        m = re.search(r"\d+\.?\d*", str(resp.content).strip())
-                        return idx, float(m.group()) if m else 0.0
+                        resp = cast(
+                            RelevanceScore,
+                            await self._score_chain.ainvoke(
+                                [HumanMessage(prompt)]
+                            ),
+                        )
+                        return idx, float(resp.score)
             except Exception:
                 return idx, 0.0
         return idx, 0.0
 
 
 class EmbedAnythingReranker:
-    """Local reranker via embed-anything ONNX models (no API key).
-
-    Implements the ``Reranker`` protocol — drop-in replacement for
-    ``CohereReranker`` and friends.
-
-    Examples::
-
-        reranker = EmbedAnythingReranker("jinaai/jina-reranker-v1-turbo-en")
-        rag = AgenticRAG("docs", backend=backend, reranker=reranker)
-
-    Requires: ``pip install embed-anything``
-    """
-
     def __init__(
         self,
         model_id: str = "jinaai/jina-reranker-v1-turbo-en",
@@ -368,7 +319,7 @@ class EmbedAnythingReranker:
         path_in_repo: str | None = "onnx",
     ):
         try:
-            import embed_anything as ea
+            import embed_anything as ea  # ty: ignore[unresolved-import]
         except ImportError as e:
             raise ImportError(
                 "embed-anything is required for EmbedAnythingReranker. "

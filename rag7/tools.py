@@ -12,20 +12,10 @@ if TYPE_CHECKING:
 
 
 class RAGToolset:
-    """LangChain tools that operate on an AgenticRAG instance."""
-
     def __init__(self, rag: AgenticRAG) -> None:
         self._rag = rag
 
     def get_index_settings(self, index_name: str = "") -> dict:
-        """Get filterable, searchable, and sortable attributes for the search index.
-
-        The 'sortable' list tells you which fields you can pass as sort criteria to boost
-        business-relevant results. Any field in 'sortable' can be passed to search_hybrid
-        as sort_fields. 'boost_fields' is derived by sampling documents — boolean sortable
-        fields and positive-numeric sortable fields are identified as business signals.
-        Use them when the question implies popularity or preference.
-        """
         try:
             config = self._rag.backend.get_index_config()
             samples = self._rag.backend.sample_documents(limit=20)
@@ -66,9 +56,6 @@ class RAGToolset:
     def search_bm25(
         self, query: str, filter_expr: str = "", top_k: int = 20
     ) -> list[dict]:
-        """BM25 keyword search on the index.
-        filter_expr: filter expression, e.g. 'field = value'. Leave empty for no filter.
-        """
         limit = top_k * self._rag.retrieval_factor
         hits = self._rag.backend.search(
             SearchRequest(
@@ -88,15 +75,6 @@ class RAGToolset:
         top_k: int = 20,
         sort_fields: list[str] | None = None,
     ) -> list[dict]:
-        """Hybrid BM25 + semantic vector search. Falls back to pure BM25 if embedding fails.
-        filter_expr: filter expression, e.g. 'field = value'.
-        semantic_ratio: 0.0 = pure keyword, 1.0 = pure semantic. Default 0.7.
-        sort_fields: optional sort criteria, e.g. ['field_name:desc'].
-          Use when the user asks for popular or preferred results.
-          Fields must be in the index's 'sortable' list (check get_index_settings first).
-          Note: sort overrides the default ranking rules — use sparingly and only when
-          business signals are clearly relevant to the question.
-        """
         limit = top_k * self._rag.retrieval_factor
 
         vector: list[float] | None = None
@@ -121,32 +99,6 @@ class RAGToolset:
         return hits[:top_k]
 
     def get_filter_values(self, field: str, sample_limit: int = 30) -> dict:
-        """Sample the actual values stored in a filterable field to inform filter decisions.
-
-        Use this before constructing a filter expression when the user mentions a specific
-        entity and you need to know the exact stored value to match against a filterable field.
-
-        Returns:
-          - 'values': list of up to sample_limit distinct non-null string/int values seen
-            in the field across sampled documents.
-          - 'filter_hint': suggested filter syntax examples for this field.
-          - 'contains_supported': True — CONTAINS operator works on string fields.
-
-        Filter syntax cheat-sheet:
-          Exact:    field = "value"
-          Partial:  field CONTAINS "partial"    <- use when user gives partial name
-          Prefix:   field STARTS WITH "pre"
-          Multiple: field IN ["value1", "value2"]
-          Boolean:  field = true
-          Numeric:  field > 2024
-          Combine:  (field1 CONTAINS "x") AND (field2 = "y")
-
-        When to filter vs. not:
-          - FILTER when: user names a specific entity that maps to a filterable field.
-            Filtering is cheap and dramatically improves precision.
-          - SKIP filter when: query is broad, entity is ambiguous, or the field has high
-            cardinality and the user intent is unclear.
-        """
         samples = self._rag.backend.sample_documents(
             limit=sample_limit,
             attributes_to_retrieve=[field],
@@ -178,7 +130,6 @@ class RAGToolset:
     def rerank_results(
         self, query: str, hits: list[dict], top_n: int = 10
     ) -> list[dict]:
-        """Cohere rerank: sort hits by relevance to query; returns top_n most relevant."""
         if not hits:
             return []
         docs = [
@@ -197,7 +148,6 @@ class RAGToolset:
         return [hits[r.index] for r in results]
 
     def as_tools(self) -> list[StructuredTool]:
-        """Convert methods to LangChain StructuredTool list."""
         tool_methods = [
             self.get_index_settings,
             self.search_bm25,

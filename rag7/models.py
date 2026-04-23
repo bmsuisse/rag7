@@ -87,6 +87,10 @@ class ReasoningVerdict(BaseModel):
         default="",
         description="Brief chain-of-thought explaining the verdict.",
     )
+    sufficient: bool = Field(
+        default=True,
+        description="True if the retrieved documents contain a direct, relevant answer to the user's question. False if off-topic, too vague, or wrong.",
+    )
     dominated_by: list[int] = Field(
         default_factory=list,
         description="1-based indices of docs that are clearly irrelevant or violate the query intent. Empty if all are fine.",
@@ -119,6 +123,37 @@ class ProductCodeQuery(BaseModel):
     code: str | None = Field(
         default=None,
         description="The extracted numeric code (digits only, no prefix words). Null if not a product-code query.",
+    )
+
+
+class StandaloneQuery(BaseModel):
+    query: str = Field(
+        description="The rewritten standalone search query. If already standalone, return it unchanged."
+    )
+
+
+class HypotheticalDoc(BaseModel):
+    text: str = Field(
+        description="2-4 sentences written as if extracted from a relevant document. Domain terminology, specific identifiers, technical terms. No questions."
+    )
+
+
+class RelevanceScore(BaseModel):
+    score: float = Field(
+        ge=0.0,
+        le=1.0,
+        description="Relevance score between 0.0 and 1.0.",
+    )
+
+
+class CloseMatchKeep(BaseModel):
+    reasoning: str = Field(
+        default="",
+        description="Brief explanation of which docs are genuinely relevant vs. which match only on brand/lexical overlap.",
+    )
+    keep: list[int] = Field(
+        default_factory=list,
+        description="1-based indices of docs that are genuinely relevant to the query's semantic intent. Drop docs that only match on brand name or lexical overlap without matching the user's concept.",
     )
 
 

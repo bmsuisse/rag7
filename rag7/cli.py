@@ -1,13 +1,3 @@
-"""
-rag7 — Interactive RAG CLI
-
-Usage:
-    rag7                    # guided setup wizard
-    rag7 --chat             # chat mode (default after setup)
-    rag7 --retriever        # retriever-only mode (no LLM answer)
-    rag7 -c my_index        # specify collection/index name
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -24,7 +14,6 @@ warnings.filterwarnings(
 )
 warnings.filterwarnings("ignore", category=DeprecationWarning, module="pydantic")
 
-# Optional: python-dotenv for .env loading
 try:
     from dotenv import load_dotenv
 
@@ -32,7 +21,6 @@ try:
 except ModuleNotFoundError:
     pass
 
-# Optional: rich for pretty output — falls back to plain print
 try:
     from rich.console import Console
     from rich.markdown import Markdown
@@ -51,15 +39,33 @@ from langchain_core.documents import Document  # noqa: E402
 
 from . import AgenticRAG, ConversationTurn  # noqa: E402
 
-
-# ── Output helpers (rich or plain) ────────────────────────────────────────────
+# Metadata fields that must not be shown to end users (internal cost,
+# inventory, revenue, employee PII, internal IDs). Any key starting with
+# "_" is also treated as internal (debug/scoring) via a startswith check
+# at the display site — do not enumerate "_*" keys here.
+_REDACT_FIELDS: frozenset[str] = frozenset(
+    {
+        "min_standard_cost",
+        "max_standard_cost",
+        "standard_cost",
+        "stock_data",
+        "total_stock_value",
+        "total_stock_quantity",
+        "total_qty_stock_unit_ltm",
+        "sales_l12m",
+        "total_sales_amount_ltm",
+        "transactions_l12m",
+        "supplier_id",
+        "product_manager",
+        "article_permitted_in_cluster_ids",
+    }
+)
 
 
 def _print(msg: str = "", **kwargs: Any) -> None:
-    if _HAS_RICH:
+    if _HAS_RICH and _console is not None:
         _console.print(msg, **kwargs)
     else:
-        # Strip basic rich markup for plain output
         import re
 
         plain = re.sub(r"\[/?[^\]]*\]", "", msg)
@@ -85,7 +91,7 @@ def _prompt(label: str, default: str = "", choices: list[str] | None = None) -> 
 
 
 def _banner(text: str) -> None:
-    if _HAS_RICH:
+    if _HAS_RICH and _console is not None:
         _console.print(Panel.fit(text, border_style="bold blue"))
     else:
         width = len(text) + 4
@@ -95,7 +101,7 @@ def _banner(text: str) -> None:
 
 
 def _section(title: str) -> None:
-    if _HAS_RICH:
+    if _HAS_RICH and _console is not None:
         _console.print(f"\n[bold cyan]{title}[/bold cyan]")
         _console.print(Rule(style="dim"))
     else:
@@ -103,8 +109,7 @@ def _section(title: str) -> None:
 
 
 def _option_table(options: list[tuple[str, str, str]]) -> None:
-    """Show options as table: (key, description, extras_needed)."""
-    if _HAS_RICH:
+    if _HAS_RICH and _console is not None:
         table = Table(show_header=True, header_style="bold", box=None)
         table.add_column("Choice", style="bold green", no_wrap=True)
         table.add_column("Description")
@@ -118,9 +123,6 @@ def _option_table(options: list[tuple[str, str, str]]) -> None:
             print(f"  {key:<14} {desc}{tag}")
 
 
-# ── Dependency checker ────────────────────────────────────────────────────────
-
-
 def _check_import(module: str, pip_extra: str) -> bool:
     try:
         __import__(module)
@@ -131,9 +133,6 @@ def _check_import(module: str, pip_extra: str) -> bool:
             f"Install with: [bold]pip install rag7[{pip_extra}][/bold]"
         )
         return False
-
-
-# ── Embedder builders ─────────────────────────────────────────────────────────
 
 
 def _build_openai_embed() -> Callable[[str], list[float]] | None:
@@ -189,7 +188,6 @@ def _build_ollama_embed() -> Callable[[str], list[float]] | None:
         resp.raise_for_status()
         return resp.json()["embeddings"][0]
 
-    # Test connection
     try:
         _embed("test")
         return _embed
@@ -210,8 +208,6 @@ _EMBEDDER_BUILDERS: dict[str, Callable[[], Callable[[str], list[float]] | None]]
     "azure": _build_azure_embed,
     "ollama": _build_ollama_embed,
 }
-
-# ── Backend options ───────────────────────────────────────────────────────────
 
 _BACKEND_OPTIONS: list[tuple[str, str, str]] = [
     ("memory", "In-memory (no setup, great for testing)", ""),
@@ -234,8 +230,6 @@ _BACKEND_MODULES: dict[str, str] = {
     "azure": "azure.search.documents",
 }
 
-# ── Reranker options ──────────────────────────────────────────────────────────
-
 _RERANKER_OPTIONS: list[tuple[str, str, str]] = [
     ("none", "No reranker (skip reranking step)", ""),
     ("cohere", "Cohere Rerank (API, best quality)", "cohere"),
@@ -243,8 +237,6 @@ _RERANKER_OPTIONS: list[tuple[str, str, str]] = [
     ("huggingface", "HuggingFace cross-encoder (local)", "huggingface"),
     ("llm", "LLM-based reranker (uses your chat model)", ""),
 ]
-
-# ── LLM options ───────────────────────────────────────────────────────────────
 
 _LLM_OPTIONS: list[tuple[str, str, str]] = [
     ("openai", "OpenAI (gpt-5.4, gpt-5.4-mini, ...)", ""),
@@ -254,18 +246,11 @@ _LLM_OPTIONS: list[tuple[str, str, str]] = [
 ]
 
 
-# ── Wizard ────────────────────────────────────────────────────────────────────
-
-
 def _env_defaults() -> dict[str, str]:
-    """Infer wizard defaults from env vars. Each key maps to a default choice
-    we'll pre-select in the relevant prompt. Missing keys fall back to hardcoded
-    defaults in the wizard."""
     d: dict[str, str] = {}
 
-    # LLM provider
     if os.getenv("AZURE_OPENAI_API_KEY") and os.getenv("AZURE_OPENAI_ENDPOINT"):
-        d["llm"] = "env"  # env-driven azure via init_agent
+        d["llm"] = "env"
     elif os.getenv("OPENAI_API_KEY"):
         d["llm"] = "openai"
     elif os.getenv("ANTHROPIC_API_KEY"):
@@ -273,7 +258,6 @@ def _env_defaults() -> dict[str, str]:
     elif os.getenv("OLLAMA_HOST") or os.getenv("OLLAMA_URL"):
         d["llm"] = "ollama"
 
-    # Embedder
     if os.getenv("AZURE_OPENAI_ENDPOINT") and (
         os.getenv("AZURE_OPENAI_EMBED_DEPLOYMENT")
         or os.getenv("AZURE_OPENAI_EMBEDDING_DEPLOYMENT")
@@ -284,7 +268,6 @@ def _env_defaults() -> dict[str, str]:
     elif os.getenv("OLLAMA_HOST") or os.getenv("OLLAMA_URL"):
         d["embedder"] = "ollama"
 
-    # Backend
     if os.getenv("MEILI_URL"):
         d["backend"] = "meilisearch"
         d["meili_url"] = os.getenv("MEILI_URL", "")
@@ -299,13 +282,11 @@ def _env_defaults() -> dict[str, str]:
         d["backend"] = "azure"
         d["azure_search_endpoint"] = os.getenv("AZURE_SEARCH_ENDPOINT", "")
 
-    # Reranker
     if os.getenv("COHERE_API_KEY"):
         d["reranker"] = "cohere"
     elif os.getenv("JINA_API_KEY"):
         d["reranker"] = "jina"
 
-    # Index
     if os.getenv("MS_INDEX"):
         d["index"] = os.getenv("MS_INDEX", "")
 
@@ -318,8 +299,6 @@ def _prompt_with_env_hint(
     env_default: str | None,
     secret: bool = False,
 ) -> str:
-    """Prompt with '(from env)' hint. When secret=True the env value is not
-    shown on screen — user presses Enter to accept the hidden default."""
     if env_default:
         if secret:
             label = f"{label} [dim](from env — hidden)[/dim]"
@@ -336,19 +315,12 @@ def _prompt_with_env_hint(
 
 
 def _wizard() -> dict[str, Any]:
-    """Interactive setup wizard. Returns kwargs for init_agent.
-
-    Env-driven defaults: when an env var implies a provider/backend/index,
-    the wizard pre-selects it so pressing Enter accepts the env-configured
-    choice.
-    """
     _banner("rag7 — Setup Wizard")
     envd = _env_defaults()
     if envd:
         detected = ", ".join(sorted(envd.keys()))
         _print(f"[dim]Detected from env: {detected}[/dim]")
 
-    # ── 1. LLM ────────────────────────────────────────────────────────────────
     _section("1. Chat / Generation LLM")
     _option_table(_LLM_OPTIONS)
     llm_choice = _prompt_with_env_hint(
@@ -365,9 +337,7 @@ def _wizard() -> dict[str, Any]:
     elif llm_choice == "ollama":
         model_name = _prompt("  Model name", default="llama3")
         model = f"ollama:{model_name}"
-    # else: env → model=None, uses env default
 
-    # ── 2. Embedder ───────────────────────────────────────────────────────────
     _section("2. Embedding Model")
     _option_table(_EMBEDDER_OPTIONS)
     embed_choice = _prompt("  Choose embedder", default="openai")
@@ -378,7 +348,6 @@ def _wizard() -> dict[str, Any]:
         if embed_fn is None and embed_choice != "none":
             _print("[dim]Falling back to no embeddings (BM25 only).[/dim]")
 
-    # ── 3. Backend ────────────────────────────────────────────────────────────
     _section("3. Vector Store / Backend")
     _option_table(_BACKEND_OPTIONS)
     backend_choice = _prompt_with_env_hint(
@@ -389,7 +358,6 @@ def _wizard() -> dict[str, Any]:
     backend_kwargs: dict[str, Any] = {}
     index = "default"
 
-    # Check dependency
     if backend_choice in _BACKEND_MODULES:
         mod = _BACKEND_MODULES[backend_choice]
         if not _check_import(mod, backend_choice):
@@ -453,7 +421,6 @@ def _wizard() -> dict[str, Any]:
         )
         index = _prompt("  Index name", default="documents")
 
-    # ── 3b. Multi-collection (optional) ───────────────────────────────────────
     collections: list[str] | None = None
     _section("3b. Multi-collection (optional)")
     _print(
@@ -466,7 +433,6 @@ def _wizard() -> dict[str, Any]:
         extras = [c.strip() for c in multi.split(",") if c.strip()]
         collections = [index, *extras] if index not in extras else extras
 
-    # ── 4. Reranker ───────────────────────────────────────────────────────────
     _section("4. Reranker")
     _option_table(_RERANKER_OPTIONS)
     reranker_choice = _prompt_with_env_hint(
@@ -498,11 +464,7 @@ def _wizard() -> dict[str, Any]:
     }
 
 
-# ── Data loading ──────────────────────────────────────────────────────────────
-
-
 def _load_documents(rag: AgenticRAG) -> None:
-    """Optionally load documents from a JSON file into the backend."""
     _section("Load Documents")
     _print("  Load documents from a JSON file?")
     _print("  Format: list of objects, each with text fields.")
@@ -522,13 +484,10 @@ def _load_documents(rag: AgenticRAG) -> None:
             _print("[red]Expected a JSON array of objects.[/red]")
             return
         _print(f"  Loading {len(data)} documents...")
-        rag.backend.add_documents(data)
+        rag.backend.add_documents(data)  # ty: ignore[unresolved-attribute]
         _print(f"  [bold green]Loaded {len(data)} documents.[/bold green]")
     except Exception as exc:
         _print(f"[red]Error loading: {exc}[/red]")
-
-
-# ── Citation formatting ───────────────────────────────────────────────────────
 
 
 def format_citation_line(i: int, doc: Document) -> str:
@@ -540,13 +499,10 @@ def format_citation_line(i: int, doc: Document) -> str:
     return f"[{i}] {label}{suffix}"
 
 
-# ── Rendering -----------------------------------------------------------------
-
-
 def render_sources(docs: list[Document]) -> None:
     if not docs:
         return
-    if _HAS_RICH:
+    if _HAS_RICH and _console is not None:
         _console.print(Rule("[dim]Sources[/dim]"))
         for i, doc in enumerate(docs, 1):
             line = format_citation_line(i, doc)
@@ -559,7 +515,7 @@ def render_sources(docs: list[Document]) -> None:
 
 
 def render_answer(answer: str, docs: list[Document]) -> None:
-    if _HAS_RICH:
+    if _HAS_RICH and _console is not None:
         _console.print()
         _console.print(
             Panel(
@@ -574,11 +530,8 @@ def render_answer(answer: str, docs: list[Document]) -> None:
     render_sources(docs)
 
 
-# ── Retriever mode ────────────────────────────────────────────────────────────
-
-
 def run_retriever(rag: AgenticRAG, question: str, top_k: int | None = None) -> None:
-    if _HAS_RICH:
+    if _HAS_RICH and _console is not None:
         with _console.status(
             "[bold yellow]Retrieving...[/bold yellow]", spinner="dots"
         ):
@@ -593,13 +546,20 @@ def run_retriever(rag: AgenticRAG, question: str, top_k: int | None = None) -> N
         _print("  No documents found.")
         return
 
+    show_internal = os.environ.get("RAG_RETRIEVER_SHOW_INTERNAL", "").lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
     for i, doc in enumerate(docs, 1):
         title = (
             doc.metadata.get("name")
             or doc.metadata.get("title")
             or doc.page_content[:80].replace("\n", " ")
         )
-        if _HAS_RICH:
+        if _HAS_RICH and _console is not None:
             table = Table(
                 title=f"#{i}  {title}",
                 show_header=True,
@@ -613,6 +573,10 @@ def run_retriever(rag: AgenticRAG, question: str, top_k: int | None = None) -> N
             table.add_column("Value", overflow="fold")
             for k, v in doc.metadata.items():
                 if v in (None, "", []):
+                    continue
+                if not show_internal and (
+                    k.startswith("_") or k in _REDACT_FIELDS
+                ):
                     continue
                 sv = str(v)
                 if len(sv) > 200:
@@ -630,12 +594,41 @@ def run_retriever(rag: AgenticRAG, question: str, top_k: int | None = None) -> N
             for k, v in doc.metadata.items():
                 if v in (None, "", []):
                     continue
+                if not show_internal and (
+                    k.startswith("_") or k in _REDACT_FIELDS
+                ):
+                    continue
                 print(f"  {k}: {v}")
             if doc.page_content:
                 print(f"  content: {doc.page_content[:300]}")
 
-
-# ── Chat runner ───────────────────────────────────────────────────────────────
+    if os.environ.get("RAG_VERBOSE", "").lower() in ("1", "true", "yes", "on"):
+        # Collect unique grader reasoning strings in retrieval order.
+        # TODO: surface state.trace entries for quality_gate/reason/final_grade
+        # once retrieve_documents exposes the trace.
+        seen: set[str] = set()
+        reasonings: list[str] = []
+        for doc in docs:
+            r = doc.metadata.get("_grader_reasoning")
+            if isinstance(r, str) and r and r not in seen:
+                seen.add(r)
+                reasonings.append(r)
+        if reasonings:
+            if _HAS_RICH and _console is not None:
+                _console.print(Rule("[dim]LLM reasoning[/dim]"))
+                for r in reasonings:
+                    _console.print(
+                        Panel(
+                            r,
+                            title="[bold magenta]close-match grader[/bold magenta]",
+                            border_style="magenta",
+                            expand=True,
+                        )
+                    )
+            else:
+                print("\n--- LLM reasoning ---")
+                for r in reasonings:
+                    print(f"  close-match grader: {r}")
 
 
 def run_chat(
@@ -643,13 +636,6 @@ def run_chat(
     question: str,
     history: list[ConversationTurn],
 ) -> ConversationTurn | None:
-    """Streaming chat: tokens print as the generation LLM emits them.
-
-    Uses `rag.astream` which calls `_aretrieve_documents` (unified retrieval
-    with filter-pin, variants, etc.) then streams the generation — better
-    time-to-first-token than ainvoke. History is folded into the question
-    as context so the retriever sees the full dialogue.
-    """
     import asyncio as _asyncio
 
     if history:
@@ -663,15 +649,13 @@ def run_chat(
 
     async def _collect() -> tuple[str, list[Any], bool]:
         _, docs = await rag._aretrieve_documents(contextualized)
-        # Grader: before streaming an answer, confirm the top docs are
-        # actually relevant to the question. Warns the user when context
-        # is weak instead of letting the LLM confabulate.
+
         grader_ok = True
         try:
             rc = await rag._arelevance_check(question, docs)
             grader_ok = rc.makes_sense and rc.confidence >= 0.5
         except Exception:
-            grader_ok = True  # grader failure shouldn't block the answer
+            grader_ok = True
         if not grader_ok:
             _print(
                 "  [yellow]Note:[/yellow] the retrieved context may not "
@@ -710,14 +694,14 @@ def run_chat(
         _print(f"[bold red]Error:[/bold red] {exc}")
         return None
 
-    query = question  # preprocessed query not surfaced in streaming path
+    query = question
     _print(f"\n  [dim]Search query:[/dim] {query}")
 
     if not answer:
         _print("  No answer generated.")
         return None
 
-    if docs and _HAS_RICH:
+    if docs and _HAS_RICH and _console is not None:
         from rich.rule import Rule
 
         _console.print(Rule("Sources"))
@@ -726,9 +710,6 @@ def run_chat(
             _print(f"  [{i}] {snippet}…")
 
     return ConversationTurn(question=question, answer=answer)
-
-
-# ── Main ──────────────────────────────────────────────────────────────────────
 
 
 def main() -> None:
@@ -780,9 +761,6 @@ def main() -> None:
     if args.verbose:
         os.environ["RAG_VERBOSE"] = "1"
 
-    # ── Wizard or env defaults ────────────────────────────────────────────────
-    # Default: skip wizard when env provides enough to build an agent.
-    # Force wizard only with --wizard. --skip-wizard kept for back-compat.
     envd = _env_defaults()
     env_sufficient = bool(envd.get("backend") or envd.get("llm") or envd.get("index"))
     use_wizard = args.wizard or (not env_sufficient and not args.skip_wizard)
@@ -790,13 +768,12 @@ def main() -> None:
     if not use_wizard:
         from .utils import _make_azure_embed_fn
 
-        # Ask only for what env/flags don't provide.
         index = args.collection or envd.get("index")
         if not index:
             index = _prompt("  Index / collection name", default="documents")
 
         collections_cfg: list[str] | dict[str, str] | None = None
-        # Only prompt for extras if the user ran the wizard or omitted --skip-wizard.
+
         if not args.collections and not args.skip_wizard:
             multi = _prompt(
                 "  Extra collections (comma-sep, blank=single)", default=""
@@ -833,7 +810,6 @@ def main() -> None:
         config = _wizard()
 
     if args.collection:
-        # Accept comma-separated list in -c as a convenience alias for --collections
         if "," in args.collection:
             parts = [p.strip() for p in args.collection.split(",") if p.strip()]
             config["index"] = parts[0]
@@ -853,7 +829,6 @@ def main() -> None:
         else:
             config["collections"] = parts
 
-    # ── Build agent ───────────────────────────────────────────────────────────
     _section("Initialising")
     _print("  Building RAG agent...")
 
@@ -865,11 +840,9 @@ def main() -> None:
         _print(f"[bold red]Failed to initialise: {exc}[/bold red]")
         sys.exit(1)
 
-    # ── Load data for in-memory backend ───────────────────────────────────────
     if config.get("backend") == "memory":
         _load_documents(rag)
 
-    # ── Mode selection ────────────────────────────────────────────────────────
     mode: str = args.mode or "chat"
     if args.mode is None and use_wizard:
         _section("5. Mode")
@@ -890,7 +863,6 @@ def main() -> None:
         "  Type your question. [bold]q[/bold] to quit, [bold]clear[/bold] to reset history.\n"
     )
 
-    # ── REPL ──────────────────────────────────────────────────────────────────
     history: list[ConversationTurn] = []
 
     while True:

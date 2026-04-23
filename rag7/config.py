@@ -36,6 +36,10 @@ class RAGConfig(BaseModel):
 
     name_field_boost_max: float = Field(default=0.1, ge=0.0, le=1.0)
 
+    boost_decay_sigma: float = Field(default=0.05, ge=0.001, le=0.5)
+
+    enable_close_match_grader: bool = True
+
     expert_top_n: int = Field(default=10, ge=2, le=50)
 
     expert_threshold: float | None = Field(default=0.15, ge=0.0, le=1.0)
@@ -57,10 +61,17 @@ class RAGConfig(BaseModel):
 
     rerank_chars: int = Field(default=2048, ge=256, le=16384)
 
+    preview_chars: int = Field(default=1500, ge=200, le=4000)
+
     strong_model: str | None = None
     weak_model: str | None = None
     thinking_model: str | None = None
     grader_model: str | None = None
+
+    # Free-text rules appended to preprocess / filter-intent / close-match
+    # prompts. Admins can set this globally under `[rag7]` or per-collection
+    # under `[rag7.collections.<name>]` to further tune retrieval.
+    custom_instructions: str = ""
 
     @classmethod
     def from_env(cls) -> Self:
@@ -82,7 +93,7 @@ class RAGConfig(BaseModel):
             rerank_top_n=int(os.getenv("RAG_RERANK_TOP_N", "5")),
             rerank_cap_multiplier=float(os.getenv("RAG_RERANK_CAP_MULTIPLIER", "2.0")),
             semantic_ratio=float(os.getenv("RAG_SEMANTIC_RATIO", "0.5")),
-            fusion=fusion,  # type: ignore[arg-type]
+            fusion=fusion,  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
             hyde_min_words=_env_int_or_none("RAG_HYDE_MIN_WORDS", "8"),
             short_query_threshold=int(os.getenv("RAG_SHORT_QUERY_THRESHOLD", "6")),
             short_query_sort_tokens=bool(
@@ -100,6 +111,10 @@ class RAGConfig(BaseModel):
             ),
             rerank_min_score=_env_float_or_none("RAG_RERANK_MIN_SCORE", "0.5"),
             name_field_boost_max=float(os.getenv("RAG_NAME_FIELD_BOOST_MAX", "0.1")),
+            boost_decay_sigma=float(os.getenv("RAG_BOOST_DECAY_SIGMA", "0.05")),
+            enable_close_match_grader=bool(
+                int(os.getenv("RAG_ENABLE_CLOSE_MATCH_GRADER", "1"))
+            ),
             expert_top_n=int(os.getenv("RAG_EXPERT_TOP_N", "10")),
             expert_threshold=_env_float_or_none("RAG_EXPERT_THRESHOLD", "0.15"),
             enable_hyde=bool(int(os.getenv("RAG_ENABLE_HYDE", "1"))),
@@ -117,10 +132,12 @@ class RAGConfig(BaseModel):
             max_iter=int(os.getenv("RAG_MAX_ITER", "3")),
             n_swarm_queries=int(os.getenv("RAG_N_SWARM_QUERIES", "4")),
             rerank_chars=int(os.getenv("RAG_RERANK_CHARS", "2048")),
+            preview_chars=int(os.getenv("RAG_PREVIEW_CHARS", "1500")),
             strong_model=os.getenv("RAG_STRONG_MODEL") or None,
             weak_model=os.getenv("RAG_WEAK_MODEL") or None,
             thinking_model=os.getenv("RAG_THINKING_MODEL") or None,
             grader_model=os.getenv("RAG_GRADER_MODEL") or None,
+            custom_instructions=os.getenv("RAG_CUSTOM_INSTRUCTIONS", ""),
             query_languages=[
                 lang.strip()
                 for lang in os.getenv("RAG_QUERY_LANGUAGES", "de,fr,it,en").split(",")
@@ -216,6 +233,9 @@ class RAGConfig(BaseModel):
                 lines.append(f"{name} = {str(value).lower()}")
             elif isinstance(value, (int, float)):
                 lines.append(f"{name} = {value}")
+            elif isinstance(value, str) and ("\n" in value or '"' in value):
+                # Use TOML triple-quoted literal string for multiline / quoted text
+                lines.append(f"{name} = '''\n{value}\n'''")
             else:
                 lines.append(f'{name} = "{value}"')
         if disabled:

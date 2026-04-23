@@ -1,5 +1,3 @@
-"""Agentic RAG — LangGraph + multi-backend retrieval-augmented generation."""
-
 import warnings as _warnings
 
 _warnings.filterwarnings(

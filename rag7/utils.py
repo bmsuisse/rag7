@@ -15,12 +15,6 @@ from stop_words import get_stop_words as _get_stop_words
 
 
 def _run_sync(coro: Coroutine[Any, Any, Any]) -> Any:
-    """Run a coroutine from sync code, tolerating an already-running loop.
-
-    Databricks notebooks, Jupyter, FastAPI handlers, etc. already have a
-    loop running, so asyncio.run() raises RuntimeError. In that case run
-    the coroutine in a worker thread with its own loop.
-    """
     try:
         asyncio.get_running_loop()
     except RuntimeError:
@@ -45,6 +39,20 @@ _SKIP_FIELDS: frozenset[str] = frozenset(
         "_id",
         "score",
         "_rankingScore",
+        # Internal commercial / inventory / PII — never feed to LLM or surface
+        "min_standard_cost",
+        "max_standard_cost",
+        "standard_cost",
+        "stock_data",
+        "total_stock_value",
+        "total_stock_quantity",
+        "total_qty_stock_unit_ltm",
+        "sales_l12m",
+        "total_sales_amount_ltm",
+        "transactions_l12m",
+        "supplier_id",
+        "product_manager",
+        "article_permitted_in_cluster_ids",
     }
 )
 
@@ -57,25 +65,14 @@ def _doc_id(meta: dict) -> str:
     return str(meta.get("id") or meta.get("article_id") or meta.get("corpus_id", ""))
 
 
-# ── Embedding cache ───────────────────────────────────────────────────────────
-# Enabled by default (embedding is deterministic for a given model + text).
-# Opt-out with RAG7_EMBED_CACHE=0.
-#
-# Backend picked by RAG7_EMBED_CACHE_URL:
-#   unset / "local" / path      → single-file JSON at ~/.cache/rag7/embeddings/
-#   "redis://host:port/db"      → Redis, one key per (model, sha256(text))
-#   "postgres://user@host/db"   → Postgres table (reuses ``_cache.py`` schema)
-# Any backend that can't load its driver (``redis`` / ``psycopg``) silently
-# falls back to the local disk cache.
-
-_EMBED_CACHE_MAX_BYTES = 50 * 1024 * 1024  # 50 MB
+_EMBED_CACHE_MAX_BYTES = 50 * 1024 * 1024
 _EMBED_CACHE_LOCK = threading.Lock()
 _EMBED_CACHE_MEM: dict[str, dict[str, list[float]]] = {}
 _EMBED_CACHE_DIRTY: set[str] = set()
 _EMBED_REDIS_CLIENT: Any = None
 _EMBED_PG_POOL: Any = None
 _EMBED_BACKEND_READY = False
-_EMBED_BACKEND: str = "local"  # "local" | "redis" | "pg"
+_EMBED_BACKEND: str = "local"
 
 
 def _embed_cache_enabled() -> bool:
@@ -88,10 +85,6 @@ def _embed_cache_enabled() -> bool:
 
 
 def _embed_cache_backend() -> str:
-    """Resolve + lazy-init the active cache backend from ``RAG7_EMBED_CACHE_URL``.
-
-    Returns 'local' / 'redis' / 'pg'. Caches the resolution after first call.
-    """
     global _EMBED_BACKEND_READY, _EMBED_BACKEND, _EMBED_REDIS_CLIENT, _EMBED_PG_POOL
     if _EMBED_BACKEND_READY:
         return _EMBED_BACKEND
@@ -99,7 +92,7 @@ def _embed_cache_backend() -> str:
     url = os.environ.get("RAG7_EMBED_CACHE_URL", "").strip()
     if url.startswith("redis://") or url.startswith("rediss://"):
         try:
-            import redis  # type: ignore[import-not-found]
+            import redis  # type: ignore[import-not-found]  # ty: ignore[unresolved-import]
 
             _EMBED_REDIS_CLIENT = redis.Redis.from_url(url, decode_responses=False)
             _EMBED_REDIS_CLIENT.ping()
@@ -110,7 +103,6 @@ def _embed_cache_backend() -> str:
         try:
             import logging as _logging
 
-            # Silence the retry barrage on invalid connection strings.
             _logging.getLogger("psycopg.pool").setLevel(_logging.CRITICAL)
             from psycopg_pool import ConnectionPool  # type: ignore[import-not-found]
 
@@ -186,8 +178,7 @@ def _embed_cache_flush(model: str) -> None:
 
 
 def _embed_cache_trim(data: dict[str, list[float]]) -> None:
-    # Approx JSON size: each entry is "hash": [...floats...] ~ 65 + ~18*dim bytes.
-    # Drop oldest (FIFO by dict insertion order) until estimate fits.
+
     if not data:
         return
     any_vec = next(iter(data.values()))
@@ -267,7 +258,7 @@ def _make_azure_embed_fn(
     api_key = os.getenv("AZURE_OPENAI_API_KEY") or ""
     deploy = os.getenv("AZURE_OPENAI_EMBEDDING_DEPLOYMENT", "text-embedding-3-small")
     api_ver = os.getenv("AZURE_OPENAI_API_VERSION", "2024-12-01-preview")
-    # Env override so CLI/test users can pin a server-side dim without code edits.
+
     env_dim = os.getenv("AZURE_OPENAI_EMBEDDING_DIM") or os.getenv("RAG7_EMBED_DIM")
     if dimensions is None and env_dim:
         try:
@@ -284,8 +275,6 @@ def _make_azure_embed_fn(
 
     from . import _cache as _c
 
-    # Namespace the cache by dim so 1536-d cached vectors don't shadow a
-    # 512-d configuration on the same deployment.
     cache_ns = f"{deploy}@{dimensions}" if dimensions else deploy
     body_extra = {"dimensions": dimensions} if dimensions else {}
 
@@ -305,9 +294,7 @@ def _make_azure_embed_fn(
         _embed_cache_put(cache_ns, text, vec)
         return vec
 
-    # Mark the function so _align_embed_fn_with_backend can rebuild it with
-    # the index's native dim (server-side Matryoshka) instead of slicing.
-    _embed._rag7_azure_rebuild = lambda dim: _make_azure_embed_fn(dimensions=dim)  # type: ignore[attr-defined]
+    _embed._rag7_azure_rebuild = lambda dim: _make_azure_embed_fn(dimensions=dim)  # type: ignore[attr-defined]  # ty: ignore[unresolved-attribute]
     return _embed
 
 
@@ -315,13 +302,6 @@ def _adapt_embed_fn_to_dim(
     embed_fn: Callable[[str], list[float]],
     target_dim: int,
 ) -> Callable[[str], list[float]]:
-    """Wrap ``embed_fn`` so outputs are sliced + L2-renormalized to ``target_dim``.
-
-    Matryoshka-trained models (text-embedding-3-*, BGE-M3, Nomic, Jina-v3) keep
-    meaning in the leading dims, so slice-then-renormalize is a valid projection.
-    For non-Matryoshka models the result is degraded but still better than
-    dim-mismatched zero-hit search.
-    """
     import math
 
     def _wrapped(text: str) -> list[float]:
@@ -357,7 +337,6 @@ def _dbsf_fuse(
     results: list[list[dict]],
     score_field: str = "_rankingScore",
 ) -> list[dict]:
-    """Distribution-Based Score Fusion — normalize scores per result set, then sum."""
     scores: dict[str, float] = {}
     seen: dict[str, dict] = {}
     for ranked in results:
@@ -375,10 +354,8 @@ def _dbsf_fuse(
 
 
 class _RedisByteStore:
-    """Minimal LangChain-compatible ByteStore backed by Redis."""
-
     def __init__(self, url: str) -> None:
-        import redis as _redis  # type: ignore[import-not-found]
+        import redis as _redis  # type: ignore[import-not-found]  # ty: ignore[unresolved-import]
 
         self._client = _redis.Redis.from_url(url, decode_responses=False)
 
@@ -400,15 +377,13 @@ class _RedisByteStore:
 
 
 class _PgByteStore:
-    """Minimal LangChain-compatible ByteStore backed by Postgres (psycopg)."""
-
     def __init__(self, dsn: str, table: str = "rag7_lc_embed_cache") -> None:
         import psycopg  # type: ignore[import-not-found]
 
         self._dsn = dsn
         self._table = table
         with psycopg.connect(dsn) as conn:
-            conn.execute(
+            conn.execute(  # ty: ignore[no-matching-overload]
                 f"CREATE TABLE IF NOT EXISTS {table} "  # noqa: S608
                 "(key TEXT PRIMARY KEY, value BYTEA NOT NULL)"
             )
@@ -423,7 +398,8 @@ class _PgByteStore:
             return [
                 (lambda row: bytes(row[0]) if row else None)(
                     conn.execute(
-                        f"SELECT value FROM {self._table} WHERE key = %s", (k,)  # noqa: S608
+                        f"SELECT value FROM {self._table} WHERE key = %s",  # noqa: S608  # ty: ignore[invalid-argument-type]
+                        (k,),
                     ).fetchone()
                 )
                 for k in keys
@@ -437,7 +413,7 @@ class _PgByteStore:
         with psycopg.connect(self._dsn) as conn:
             for key, value in key_value_pairs:
                 conn.execute(
-                    f"INSERT INTO {self._table}(key, value) VALUES (%s, %s) "  # noqa: S608
+                    f"INSERT INTO {self._table}(key, value) VALUES (%s, %s) "  # noqa: S608  # ty: ignore[invalid-argument-type]
                     "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
                     (key, value),
                 )
@@ -451,7 +427,8 @@ class _PgByteStore:
         with psycopg.connect(self._dsn) as conn:
             for key in keys:
                 conn.execute(
-                    f"DELETE FROM {self._table} WHERE key = %s", (key,)  # noqa: S608
+                    f"DELETE FROM {self._table} WHERE key = %s",  # noqa: S608  # ty: ignore[invalid-argument-type]
+                    (key,),
                 )
             conn.commit()
 
@@ -461,28 +438,22 @@ class _PgByteStore:
         with psycopg.connect(self._dsn) as conn:
             if prefix:
                 rows = conn.execute(
-                    f"SELECT key FROM {self._table} WHERE key LIKE %s",  # noqa: S608
+                    f"SELECT key FROM {self._table} WHERE key LIKE %s",  # noqa: S608  # ty: ignore[invalid-argument-type]
                     (prefix + "%",),
                 ).fetchall()
             else:
-                rows = conn.execute(
+                rows = conn.execute(  # ty: ignore[no-matching-overload]
                     f"SELECT key FROM {self._table}"  # noqa: S608
                 ).fetchall()
         yield from (row[0] for row in rows)
 
 
 def _make_embed_byte_store(uri: str) -> Any:
-    """Return a LangChain-compatible ByteStore from a URI or filesystem path.
-
-    - ``redis://`` / ``rediss://``  → ``_RedisByteStore`` (requires ``redis``)
-    - ``postgres://`` / ``postgresql://`` → ``_PgByteStore`` (requires ``psycopg``)
-    - anything else → ``LocalFileStore`` (treated as directory path, ``~`` expanded)
-    """
     if uri.startswith(("redis://", "rediss://")):
         return _RedisByteStore(uri)
     if uri.startswith(("postgres://", "postgresql://")):
         return _PgByteStore(uri)
-    from langchain.storage import LocalFileStore  # type: ignore[import-not-found]
+    from langchain.storage import LocalFileStore  # type: ignore[import-not-found]  # ty: ignore[unresolved-import]
 
     return LocalFileStore(str(Path(uri).expanduser()))
 
@@ -509,47 +480,13 @@ def embed_fn_from_langchain(
     cache: str | Path | None = None,
     namespace: str = "embeddings",
 ) -> Callable[[str], list[float]]:
-    """Wrap any LangChain ``Embeddings`` instance as an rag7 ``embed_fn``.
-
-    Caching is auto-enabled when ``RAG7_EMBED_CACHE_URL`` is set, or pass
-    ``cache`` explicitly.  Both accept a filesystem path, Redis URL, or
-    Postgres DSN:
-
-    .. code-block:: python
-
-        from langchain_openai import AzureOpenAIEmbeddings
-        from rag7.utils import embed_fn_from_langchain
-
-        # disk cache
-        embed_fn_from_langchain(emb, cache="~/.cache/rag7/lc", namespace="text-embedding-3-small")
-        # Redis
-        embed_fn_from_langchain(emb, cache="redis://localhost:6379/0", namespace="te3s")
-        # Postgres
-        embed_fn_from_langchain(emb, cache="postgresql://user:pw@host/db", namespace="te3s")
-        # env-driven (set RAG7_EMBED_CACHE_URL in environment)
-        embed_fn_from_langchain(emb, namespace="text-embedding-3-small")
-
-    Or bring your own ``CacheBackedEmbeddings`` — the cache bypass bug
-    (``embed_query`` skips the cache) is fixed automatically.
-
-    Parameters
-    ----------
-    embeddings:
-        Any object exposing ``.embed_query(text) -> list[float]`` and/or
-        ``.embed_documents([text]) -> list[list[float]]``.
-    prefer_query:
-        Call ``.embed_query()`` when available (default True). Ignored when
-        caching is active or a ``CacheBackedEmbeddings`` instance is detected.
-    cache:
-        Filesystem path, ``redis://`` URL, or ``postgres://`` DSN. Falls back
-        to ``RAG7_EMBED_CACHE_URL`` env var when omitted.
-    namespace:
-        Cache key prefix — use the model name to avoid collisions between
-        different embedding deployments sharing the same store.
-    """
-    cache_uri = str(cache) if cache is not None else os.environ.get("RAG7_EMBED_CACHE_URL", "").strip()
+    cache_uri = (
+        str(cache)
+        if cache is not None
+        else os.environ.get("RAG7_EMBED_CACHE_URL", "").strip()
+    )
     if cache_uri:
-        from langchain.embeddings import CacheBackedEmbeddings  # type: ignore[import-not-found]
+        from langchain.embeddings import CacheBackedEmbeddings  # type: ignore[import-not-found]  # ty: ignore[unresolved-import]
 
         store = _make_embed_byte_store(cache_uri)
         embeddings = CacheBackedEmbeddings.from_bytes_store(
@@ -560,11 +497,9 @@ def embed_fn_from_langchain(
         )
         prefer_query = False
 
-    # CacheBackedEmbeddings caches embed_documents, not embed_query (unless
-    # query_embedding_store is set). Route through embed_documents to hit cache.
     if prefer_query:
         try:
-            from langchain.embeddings import CacheBackedEmbeddings
+            from langchain.embeddings import CacheBackedEmbeddings  # ty: ignore[unresolved-import]
 
             if isinstance(embeddings, CacheBackedEmbeddings):
                 prefer_query = False

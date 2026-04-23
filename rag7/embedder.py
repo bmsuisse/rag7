@@ -1,33 +1,10 @@
-"""Local embedder implementations.
-
-Currently ships ``EmbedAnythingEmbedder`` — Rust-backed embeddings via
-the `embed-anything` package. Drop-in replacement for remote embed_fns
-(Azure, Cohere, Voyage) when you want fully-local inference.
-"""
-
 from __future__ import annotations
 
 
 class EmbedAnythingEmbedder:
-    """Local embeddings via embed-anything (Rust-accelerated, no API key).
-
-    Works as a drop-in ``embed_fn`` — call the instance directly or use ``.embed()``.
-
-    Examples::
-
-        embedder = EmbedAnythingEmbedder("sentence-transformers/all-MiniLM-L6-v2")
-        rag = AgenticRAG("docs", backend=backend, embed_fn=embedder)
-
-        # Or with ONNX for faster inference:
-        from embed_anything import WhichModel
-        embedder = EmbedAnythingEmbedder.from_onnx(WhichModel.Bert)
-
-    Requires: ``pip install embed-anything``
-    """
-
     def __init__(self, model_id: str = "sentence-transformers/all-MiniLM-L6-v2"):
         try:
-            import embed_anything as ea
+            import embed_anything as ea  # ty: ignore[unresolved-import]
         except ImportError as e:
             raise ImportError(
                 "embed-anything is required for EmbedAnythingEmbedder. "
@@ -41,7 +18,7 @@ class EmbedAnythingEmbedder:
     @classmethod
     def from_onnx(cls, which_model: object, **kwargs: object) -> EmbedAnythingEmbedder:
         try:
-            import embed_anything as ea
+            import embed_anything as ea  # ty: ignore[unresolved-import]
         except ImportError as e:
             raise ImportError(
                 "embed-anything is required for EmbedAnythingEmbedder. "
