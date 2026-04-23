@@ -428,7 +428,7 @@ def _detect_index_signals(
     sort_fields = [f"{f}:desc" for f in bool_fields + num_fields]
 
     def boost_fn(meta: dict) -> float:
-        binary_boost = 1.2 if any(meta.get(f) for f in bool_fields) else 1.0
+        binary_boost = 1.1 if any(meta.get(f) for f in bool_fields) else 1.0
         top_num = max((float(meta.get(f, 0) or 0) for f in num_fields), default=0.0)
         if top_num < 150_000:
             top_num = 0.0
