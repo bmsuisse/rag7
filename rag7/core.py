@@ -79,7 +79,6 @@ _llm_retry = retry(
     reraise=True,
 )
 
-
 _CATEGORY_FIELD_PATTERN = re.compile(
     r"(group|category|kategorie|categorie|categoria|class|klass|type|typ|section|department|rubrik|family)",
     re.IGNORECASE,
@@ -134,13 +133,6 @@ def _is_brand_intent(intent: FilterIntent) -> bool:
 
 
 def _detect_embedder_name(backend: SearchBackend, *, fallback: str) -> str:
-    """Pick an embedder name declared on the index, else ``fallback``.
-
-    Meilisearch rejects vector search with an unknown embedder name and
-    silently strips the vector arm — a wrong default collapses hybrid
-    search to BM25. Prefer ``default`` when present; otherwise the first
-    declared name.
-    """
     try:
         names = backend.get_index_config().embedders
     except Exception:
@@ -153,12 +145,6 @@ def _detect_embedder_name(backend: SearchBackend, *, fallback: str) -> str:
 
 
 def _validate_embedder_name(backend: SearchBackend, name: str) -> None:
-    """Warn if ``name`` isn't declared on the backend's index.
-
-    Meilisearch silently drops the vector arm when the embedder name is
-    unknown — the query degrades to BM25-only without any error. Surface
-    that at init so users don't blame the retriever for a config typo.
-    """
     try:
         names = backend.get_index_config().embedders
     except Exception:
@@ -178,21 +164,6 @@ def _align_embed_fn_with_backend(
     embed_fn: "Callable[[str], list[float]] | None",
     backend: SearchBackend,
 ) -> "Callable[[str], list[float]] | None":
-    """Reconcile ``embed_fn`` output dim with the backend's index dim.
-
-    When the index pins a single vector dimension and the embed function
-    produces a different size, vector search silently returns zero hits (the
-    backend drops the request). Detect once at init and:
-
-    * If all possible index dims are equal to the probe result → no-op.
-    * If exactly one index dim is declared → wrap with slice-and-renormalize
-      so the rest of the pipeline sends the right shape.
-    * Otherwise (multiple dims, no dims, or probe fails) → leave the fn alone.
-
-    The wrapper is a best-effort projection — it works well for
-    Matryoshka-trained models (text-embedding-3-*, BGE-M3, Nomic, Jina v3)
-    and at worst is no worse than the zero-hit status quo.
-    """
     if embed_fn is None:
         return None
     try:
@@ -227,9 +198,7 @@ def _align_embed_fn_with_backend(
             stacklevel=3,
         )
         return embed_fn
-    # If the embedder is a rebuildable Azure client, ask OpenAI for native
-    # {target}-d vectors server-side (text-embedding-3 Matryoshka). Cheaper
-    # than slice+renorm and reuses the cache by dim namespace.
+
     rebuild = getattr(embed_fn, "_rag7_azure_rebuild", None)
     if callable(rebuild):
         rebuilt = cast(Callable[[str], list[float]] | None, rebuild(target))
@@ -247,55 +216,79 @@ def _align_embed_fn_with_backend(
 
 
 _FILTER_INTENT_WORDS_BY_LANG: dict[str, frozenset[str]] = {
-    "de": frozenset({"von", "vom", "aus", "ohne", "nicht", "kein", "keine", "für", "fur", "bei", "mit"}),
+    "de": frozenset(
+        {
+            "von",
+            "vom",
+            "aus",
+            "ohne",
+            "nicht",
+            "kein",
+            "keine",
+            "für",
+            "fur",
+            "bei",
+            "mit",
+        }
+    ),
     "fr": frozenset({"de", "du", "des", "sans", "pour", "par", "pas", "avec", "chez"}),
     "it": frozenset({"di", "da", "del", "della", "senza", "non", "per", "con"}),
     "en": frozenset({"from", "without", "not", "no", "for", "by", "of", "with"}),
 }
 
-# Fallback used before instance is available (fast-accept path uses module scope).
-# Covers all languages — instances narrow this via self._filter_intent_words.
 _FILTER_INTENT_WORDS = frozenset(
     w for ws in _FILTER_INTENT_WORDS_BY_LANG.values() for w in ws
 )
 
-# Negation tokens across all supported languages (DE/FR/IT/EN).
-# Used to guard preprocess-skip heuristics — a query with a negation word
-# requires the LLM to interpret exclusion semantics correctly.
-_NEGATION_TOKENS: frozenset[str] = frozenset({
-    # German
-    "nicht", "ohne", "kein", "keine", "keinen", "keinem",
-    # English
-    "not", "no", "without", "except", "exclude", "excluding",
-    # French
-    "sans", "pas", "aucun", "aucune",
-    # Italian
-    "senza", "non", "nessun", "nessuna",
-})
-
+_NEGATION_TOKENS: frozenset[str] = frozenset(
+    {
+        "nicht",
+        "ohne",
+        "kein",
+        "keine",
+        "keinen",
+        "keinem",
+        "not",
+        "no",
+        "without",
+        "except",
+        "exclude",
+        "excluding",
+        "sans",
+        "pas",
+        "aucun",
+        "aucune",
+        "senza",
+        "non",
+        "nessun",
+        "nessuna",
+    }
+)
 
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
 
+# Queries that are purely numeric with 6+ digits are product codes (EAN-8/13, GTIN-14,
+# internal article IDs). Skip all LLM/HyDE/filter-intent and do a direct BM25 lookup.
+_PRODUCT_CODE_RE = re.compile(r"^\d{6,}$")
+
 
 def _clean_string(s: str) -> str:
-    """Strip HTML tags and collapse whitespace — reranker sees clean prose."""
     return re.sub(r"\s+", " ", _HTML_TAG_RE.sub(" ", s)).strip()
 
 
 def _doc_to_grader_text(doc: "Document") -> str:
-    """Render document for grader context: identity fields first, then all akeneo text.
-
-    _hit_to_text sorts shortest→longest for the reranker, which pushes long product
-    descriptions (akeneo_values.Beschreibung lang) past the preview_chars cutoff.
-    This function puts article identity + ALL akeneo text fields first so the grader
-    can verify relevance even for articles whose name doesn't match the query term
-    (e.g. 'ProOne Multi-Tool 12 in 1 Inox' containing 'Flaschenöffner' in description).
-    """
     m = doc.metadata
     lines: list[str] = []
-    for key in ("article_name", "article_id", "brand", "supplier_name",
-                "product_group_l1", "product_group_l2", "product_group_l3",
-                "search_terms"):
+    for key in (
+        "article_name",
+        "article_id",
+        "brand",
+        "supplier_name",
+        "product_group_l1",
+        "product_group_l2",
+        "product_group_l3",
+        "search_terms",
+    ):
         v = m.get(key)
         if v:
             lines.append(f"**{key}**: {_clean_string(str(v))}")
@@ -307,17 +300,17 @@ def _doc_to_grader_text(doc: "Document") -> str:
     return "\n".join(lines) if lines else doc.page_content[:1500]
 
 
-def _filter_bohrer_variants(question: str, corrected_query: str, variants: list[str]) -> list[str]:
-    """Drop variants containing drill-related terms when the original query does not.
-
-    Guards against drill/screwdriver subtype confusion (Akkuschrauber →
-    Akkuschraubbohrer, Bohrschrauber) without touching the LLM prompt or cache.
-    Queries that already mention drilling (e.g. Bohrhammer) are unaffected.
-    """
+def _filter_bohrer_variants(
+    question: str, corrected_query: str, variants: list[str]
+) -> list[str]:
     orig = (question + " " + corrected_query).lower()
     if "bohrer" in orig or "bohrschrauber" in orig:
         return variants
-    return [v for v in variants if "bohrer" not in v.lower() and "bohrschrauber" not in v.lower()]
+    return [
+        v
+        for v in variants
+        if "bohrer" not in v.lower() and "bohrschrauber" not in v.lower()
+    ]
 
 
 _MAX_LIST_ITEMS = 8
@@ -328,12 +321,6 @@ would otherwise push downstream fields past the rerank_chars cutoff."""
 
 
 def _render_value(v: Any, indent: int = 0) -> str:
-    """Markdown renderer: bold labels, flat bullets, HTML stripped, lists capped.
-
-    Markdown beat YAML and JSON on reranker accuracy in our eval
-    (+1 hit over YAML, +2 over JSON). Returns empty when the value
-    carries no information.
-    """
     if isinstance(v, str):
         return _clean_string(v)
     if isinstance(v, bool) or isinstance(v, (int, float)):
@@ -377,11 +364,6 @@ def _render_value(v: Any, indent: int = 0) -> str:
 
 
 def _detect_category_fields(backend: SearchBackend) -> list[str]:
-    """Heuristic: find metadata fields likely to encode a category/group.
-
-    Scans sample docs for keys matching category-like substrings with string
-    values. Returns specific (e.g. ``*_l3``) before general (``category``).
-    """
     try:
         samples = backend.sample_documents(limit=20)
     except Exception:
@@ -398,7 +380,6 @@ def _detect_category_fields(backend: SearchBackend) -> list[str]:
     if not seen:
         return []
 
-    # Rank: specific suffixes (_l3 > _l2 > _l1) first, then higher coverage.
     def rank(k: str) -> tuple[int, int]:
         depth = 0
         for suffix, d in (("_l3", 3), ("_l2", 2), ("_l1", 1)):
@@ -459,197 +440,11 @@ def _detect_index_signals(
 
 
 class AgenticRAG:
-    """Autonomous retrieval-augmented generation agent built on LangGraph.
-
-    rag7 is not a search pipeline — it is an agent. Given a question it
-    thinks, searches, judges the results, rewrites the query if needed, and
-    keeps going until it is confident enough to generate a grounded, cited
-    answer. All of this happens autonomously, without any orchestration code
-    on your side.
-
-    Two operating modes
-    -------------------
-    **Graph mode** (``chat`` / ``invoke``)
-        A LangGraph state machine runs the full pipeline:
-
-        1. *Preprocess* — extract keywords, detect semantic/BM25 ratio, pick
-           RRF or DBSF fusion strategy.
-        2. *HyDE* — generate a hypothetical document to improve vector recall
-           on vague queries (runs in parallel with preprocessing).
-        3. *Hybrid search* — multi-query BM25 + vector search across N query
-           variants, fused with Reciprocal Rank Fusion or Distribution-Based
-           Score Fusion.
-        4. *Rerank* — Cohere, HuggingFace cross-encoder, Jina, or any custom
-           reranker surfaces the most relevant hits.
-        5. *Quality gate* — an LLM judges whether the retrieved documents
-           actually answer the question.
-        6. *Generate or rewrite* — if quality is sufficient, generate a cited
-           answer; otherwise rewrite the query and loop (up to ``max_iter``
-           times). If all attempts fail, swarm retrieval fans out to parallel
-           strategies before giving up.
-
-    **Tool-calling agent mode** (``invoke_agent``)
-        The LLM receives a toolset and reasons step-by-step, calling tools in
-        whatever order makes sense. No fixed pipeline — the agent inspects the
-        index schema, samples real field values, builds precise filter
-        expressions on the fly, and decides whether to boost by business
-        signals such as popularity or recency.
-
-        Available tools: ``get_index_settings``, ``get_filter_values``,
-        ``search_hybrid``, ``search_bm25``, ``rerank_results``.
-
-    Parameters
-    ----------
-    index:
-        Collection / index name in the backend.
-    backend:
-        A ``SearchBackend`` instance. Defaults to ``InMemoryBackend``
-        (zero dependencies, useful for testing and quick prototyping).
-    llm:
-        Fast LLM used for query preprocessing, rewriting, and the quality
-        gate. Defaults to Azure OpenAI if ``AZURE_OPENAI_ENDPOINT`` is set,
-        otherwise OpenAI.
-    gen_llm:
-        Generation LLM used for the final answer. Defaults to ``llm`` with a
-        longer timeout. Useful to separate a cheap routing model from a
-        powerful generation model.
-    reranker:
-        Reranker instance. Defaults to ``CohereReranker`` if the ``cohere``
-        package is installed, otherwise ``LLMReranker``.
-    top_k:
-        Number of documents returned after reranking. Default: 10
-        (``RAG_TOP_K``).
-    rerank_top_n:
-        Number of candidates passed to the reranker. Default: 5
-        (``RAG_RERANK_TOP_N``).
-    retrieval_factor:
-        Over-retrieval multiplier — ``top_k * retrieval_factor`` documents
-        are fetched before reranking. Default: 4 (``RAG_RETRIEVAL_FACTOR``).
-    max_iter:
-        Maximum retrieve-rewrite cycles before giving up. Default: 20
-        (``RAG_MAX_ITER``).
-    semantic_ratio:
-        Hybrid search semantic weight (0.0 = pure BM25, 1.0 = pure vector).
-        Overridden per query by the preprocessor when ``auto_strategy=True``.
-        Default: 0.5 (``RAG_SEMANTIC_RATIO``).
-    fusion:
-        Score fusion strategy: ``"rrf"`` (Reciprocal Rank Fusion, rank-based,
-        stable) or ``"dbsf"`` (Distribution-Based Score Fusion,
-        score-normalised). Default: ``"rrf"`` (``RAG_FUSION``).
-    instructions:
-        Extra text appended to the system prompt for answer generation.
-        Use to inject domain-specific constraints or tone requirements.
-    embed_fn:
-        Callable ``(str) -> list[float]`` used to embed queries for vector
-        search and HyDE. If ``None`` and the backend supports server-side
-        vectorisation (e.g. Azure AI Search integrated vectorizer), no
-        client-side embedding is performed.
-    boost_fn:
-        Callable ``(doc_dict) -> float`` applied after reranking to boost
-        documents by business signals (e.g. in-stock flag, sales rank).
-    filter:
-        Meilisearch-style filter expression (e.g. ``"brand = 'Bosch'"``,
-        ``"in_stock = true AND price < 100"``) applied to every search
-        request — BM25, vector, and hybrid. Useful for tenant isolation,
-        always-on brand/category scoping, or multi-occupant indexes.
-        Per-query filters (intent-detected) are AND-joined with this.
-    base_filter:
-        Deprecated alias for ``filter``. Will be removed in a future release.
-    hyde_min_words:
-        Minimum query word count to trigger HyDE expansion. Default: 8
-        (``RAG_HYDE_MIN_WORDS``).
-    hyde_style_hint:
-        Short phrase injected into the HyDE prompt to match the document
-        style, e.g. ``"German product spec sheet"``.
-    collections:
-        Dict mapping collection name → ``SearchBackend``. Enables
-        multi-collection mode: the agent selects which collections to query
-        per request using an LLM routing step. Mutually exclusive with
-        ``backend``.
-    collection_descriptions:
-        Human-readable description for each collection in ``collections``.
-        Fed to the routing LLM so it can make informed decisions.
-        Defaults to the collection name when not provided.
-    auto_strategy:
-        If ``True`` (default), sample documents at init time and let an LLM
-        detect ``hyde_style_hint``, ``hyde_min_words``, and a
-        ``domain_hint`` that guides query preprocessing — no hardcoded
-        domain logic required. Set ``False`` only for testing or when you
-        want full manual control.
-    group_field:
-        Metadata field used to detect query-group mismatches during
-        boost-aware reranking.
-    name_field:
-        Metadata field used as the document name for token-overlap boosting.
-    checkpointer:
-        LangGraph checkpointer for persistent memory across calls. Pass a
-        ``MemorySaver`` for in-process memory, or ``SqliteSaver`` /
-        ``PostgresSaver`` for durable persistence. When set, pass
-        ``config={"configurable": {"thread_id": "..."}}`` to ``invoke`` /
-        ``chat`` to scope memory to a conversation thread.
-    memory_store:
-        LangGraph ``BaseStore`` for long-term cross-thread memory. The agent
-        reads relevant past exchanges before retrieval and writes a summary
-        after each answer. Pass ``config={"configurable": {"user_id": "..."}}``
-        to scope memories per user. Use ``InMemoryStore`` for development or
-        ``AsyncPostgresStore`` / ``AsyncSqliteStore`` for production.
-    mem0_memory:
-        A ``mem0`` ``Memory`` or ``AsyncMemory`` instance for smarter
-        long-term memory. Uses LLM-based fact extraction, deduplication, and
-        conflict resolution — stores discrete facts ("prefers German answers")
-        rather than raw Q&A strings. Preferred over ``memory_store`` when
-        available. Pass ``config={"configurable": {"user_id": "..."}}`` to
-        scope per user. Install: ``pip install mem0ai``.
-
-    Examples
-    --------
-    Minimal — in-memory backend, LLM from env vars, auto-strategy on by default:
-
-    >>> from rag7 import Agent, InMemoryBackend
-    >>> rag = Agent(index="docs", backend=InMemoryBackend(embed_fn=my_embed))
-    >>> print(rag.query("What is hybrid search?"))
-
-    Multi-collection routing — agent picks which collections to search:
-
-    >>> from rag7 import Agent, MeilisearchBackend
-    >>> backends = {
-    ...     "products": MeilisearchBackend("products"),
-    ...     "manuals": MeilisearchBackend("manuals"),
-    ... }
-    >>> rag = Agent(
-    ...     index="catalog",
-    ...     collections=backends,
-    ...     collection_descriptions={
-    ...         "products": "Product listings with prices and specs",
-    ...         "manuals": "Installation and user guides",
-    ...     },
-    ... )
-    >>> state = rag.chat("How do I install product X?", history=[])
-
-    Always-on filter — restrict every search to a subset of documents:
-
-    >>> rag = Agent(
-    ...     index="products",
-    ...     backend=MeilisearchBackend("products"),
-    ...     filter="in_stock = true AND brand != 'HouseBrand'",
-    ... )
-    >>> state = rag.chat("brake cleaner 500ml", history=[])
-
-    Tool-calling agent mode for dynamic, schema-aware filtering:
-
-    >>> result = rag.invoke_agent("Show me the top rated products from Bosch")
-    """
-
     @staticmethod
     def _default_llm(
         *,
         timeout: int = 30,
     ) -> BaseChatModel:
-        """Create default LLM from environment variables.
-
-        Tries Azure OpenAI first (if AZURE_OPENAI_ENDPOINT set),
-        falls back to OpenAI (if OPENAI_API_KEY set).
-        """
         if os.getenv("AZURE_OPENAI_ENDPOINT"):
             from langchain_openai import AzureChatOpenAI
 
@@ -658,9 +453,9 @@ class AgenticRAG:
             )
             return AzureChatOpenAI(  # type: ignore[call-arg]
                 azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
-                azure_deployment=deploy,  # ty: ignore[unknown-argument]
-                api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-12-01-preview"),  # ty: ignore[unknown-argument]
-                api_key=os.getenv("AZURE_OPENAI_API_KEY"),  # ty: ignore[unknown-argument]
+                azure_deployment=deploy,
+                api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-12-01-preview"),
+                api_key=os.getenv("AZURE_OPENAI_API_KEY"),
                 temperature=0,
                 request_timeout=timeout,  # type: ignore[call-arg]
             )
@@ -668,15 +463,14 @@ class AgenticRAG:
         from langchain_openai import ChatOpenAI
 
         return ChatOpenAI(  # type: ignore[call-arg]
-            model=os.getenv("OPENAI_MODEL", "gpt-5.4"),  # ty: ignore[unknown-argument]
-            api_key=os.getenv("OPENAI_API_KEY"),  # ty: ignore[unknown-argument]
+            model=os.getenv("OPENAI_MODEL", "gpt-5.4"),
+            api_key=os.getenv("OPENAI_API_KEY"),
             temperature=0,
             request_timeout=timeout,  # type: ignore[call-arg]
         )
 
     @staticmethod
     def _default_gen_llm() -> BaseChatModel:
-        """Create default generation LLM (higher timeout)."""
         if os.getenv("AZURE_OPENAI_ENDPOINT"):
             from langchain_openai import AzureChatOpenAI
 
@@ -685,9 +479,9 @@ class AgenticRAG:
             )
             return AzureChatOpenAI(  # type: ignore[call-arg]
                 azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
-                azure_deployment=deploy,  # ty: ignore[unknown-argument]
-                api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-12-01-preview"),  # ty: ignore[unknown-argument]
-                api_key=os.getenv("AZURE_OPENAI_API_KEY"),  # ty: ignore[unknown-argument]
+                azure_deployment=deploy,
+                api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-12-01-preview"),
+                api_key=os.getenv("AZURE_OPENAI_API_KEY"),
                 temperature=0,
                 request_timeout=60,  # type: ignore[call-arg]
             )
@@ -695,30 +489,16 @@ class AgenticRAG:
         from langchain_openai import ChatOpenAI
 
         return ChatOpenAI(  # type: ignore[call-arg]
-            model=os.getenv("OPENAI_MODEL", "gpt-5.4"),  # ty: ignore[unknown-argument]
-            api_key=os.getenv("OPENAI_API_KEY"),  # ty: ignore[unknown-argument]
+            model=os.getenv("OPENAI_MODEL", "gpt-5.4"),
+            api_key=os.getenv("OPENAI_API_KEY"),
             temperature=0,
             request_timeout=60,  # type: ignore[call-arg]
         )
 
     @staticmethod
     def _resolve_llm(spec: str, timeout: int = 30) -> BaseChatModel:
-        """Build an LLM from a ``provider:model`` spec via langchain's
-        ``init_chat_model`` — supports every langchain chat provider.
-
-        We accept the short ``"azure:gpt-5.4"`` form alongside langchain's
-        canonical ``"azure_openai:gpt-5.4"`` for ergonomics. For Azure, the
-        model portion is passed as the deployment name.
-
-        Examples:
-            ``"azure:gpt-5.4"``      → AzureChatOpenAI (AZURE_OPENAI_* env)
-            ``"azure:gpt-5.4-mini"`` → same, with a smaller deployment
-            ``"openai:gpt-4o-mini"`` → ChatOpenAI
-            ``"anthropic:claude-haiku-4-5"`` → ChatAnthropic
-        """
         from langchain.chat_models import init_chat_model
 
-        # Normalize our short "azure:..." to langchain's "azure_openai:..."
         if spec.startswith("azure:"):
             spec = "azure_openai:" + spec.split(":", 1)[1]
 
@@ -735,13 +515,6 @@ class AgenticRAG:
 
     @staticmethod
     def _chain_llm(llm: BaseChatModel, name: str) -> BaseChatModel:
-        """Bind prompt_cache_key for non-Azure OpenAI models.
-
-        Azure OpenAI caches prompt prefixes automatically; for plain OpenAI
-        the key must be supplied explicitly so repeated system-prompt prefixes
-        are served from the prompt cache instead of re-tokenised each call.
-        Each chain gets a unique key to avoid cross-chain cache collisions.
-        """
         try:
             from langchain_openai import AzureChatOpenAI
 
@@ -753,14 +526,16 @@ class AgenticRAG:
             from langchain_openai import ChatOpenAI
 
             if isinstance(llm, ChatOpenAI):
-                return cast(BaseChatModel, llm.bind(model_kwargs={"prompt_cache_key": f"rag7-{name}-v1"}))
+                return cast(
+                    BaseChatModel,
+                    llm.bind(model_kwargs={"prompt_cache_key": f"rag7-{name}-v1"}),
+                )
         except ImportError:
             pass
         return llm
 
     @staticmethod
     def _default_reranker() -> CohereReranker | LLMReranker:
-        """Create default reranker: Cohere if available, else LLM-based."""
         try:
             return CohereReranker()
         except Exception:
@@ -776,46 +551,6 @@ class AgenticRAG:
         configurable_fields: str | list[str] | None = None,
         **kwargs: Any,
     ) -> "AgenticRAG":
-        """Create an AgenticRAG from a provider-prefixed model string.
-
-        Wraps LangChain's ``init_chat_model`` so you never have to import
-        provider-specific classes.  Pass ``"provider:model-name"`` and the
-        right LangChain package is selected automatically.
-
-        Supported providers (same as ``init_chat_model``):
-            openai, anthropic, azure_openai, google_vertexai, google_genai,
-            bedrock, mistralai, groq, ollama, fireworks, together, …
-
-        Parameters
-        ----------
-        model:
-            Model string, either ``"provider:model-name"`` (e.g.
-            ``"openai:gpt-5.4"``, ``"anthropic:claude-sonnet-4-6"``,
-            ``"ollama:llama3"``) or a bare model name when the provider can
-            be inferred from installed packages.
-        index:
-            Collection / index name in the backend.
-        gen_model:
-            Optional separate generation model string in the same format.
-            Defaults to ``model``.
-        configurable_fields:
-            Passed through to ``init_chat_model`` for runtime configurability.
-        **kwargs:
-            All other ``AgenticRAG.__init__`` keyword arguments (``backend``,
-            ``reranker``, ``top_k``, ``instructions``, ``embed_fn``, …).
-
-        Examples
-        --------
-        >>> from rag7 import Agent
-        >>> rag = Agent.from_model("openai:gpt-5.4", index="docs")
-        >>> rag = Agent.from_model(
-        ...     "anthropic:claude-sonnet-4-6",
-        ...     index="docs",
-        ...     gen_model="anthropic:claude-opus-4-6",
-        ...     instructions="Answer only in English.",
-        ... )
-        >>> rag = Agent.from_model("ollama:llama3", index="docs")
-        """
         from langchain.chat_models import init_chat_model  # type: ignore[import-untyped]
 
         init_kwargs: dict[str, Any] = {"temperature": 0}
@@ -939,9 +674,6 @@ class AgenticRAG:
                 filter = base_filter
         self.filter = filter
 
-        # Resolve LLMs into three tiers — strong (gen / rewrite), weak (cheap
-        # high-frequency calls), thinking (reasoning). Explicit kwargs win over
-        # config specs, which win over env defaults.
         if gen_llm is not None:
             self._gen_llm = gen_llm
         elif config is not None and config.strong_model:
@@ -954,16 +686,14 @@ class AgenticRAG:
             self._llm = self._resolve_llm(config.weak_model, timeout=30)
         else:
             self._llm = self._default_llm()
-        # Thinking tier: separate instance when explicitly configured, else
-        # fall back to the weak _llm (current behavior, backward compatible).
+
         if config is not None and config.thinking_model:
             self._thinking_llm: BaseChatModel = self._resolve_llm(
                 config.thinking_model, timeout=60
             )
         else:
             self._thinking_llm = self._llm
-        # Grader tier: optional dedicated model (e.g. mini to avoid brain rate-limits).
-        # Falls back to thinking_llm so default behavior is unchanged.
+
         if config is not None and config.grader_model:
             self._grader_llm: BaseChatModel = self._resolve_llm(
                 config.grader_model, timeout=60
@@ -986,7 +716,7 @@ class AgenticRAG:
             self._rerank_cap_multiplier = config.rerank_cap_multiplier
             self.semantic_ratio = config.semantic_ratio
             self.fusion = config.fusion
-            self.hyde_min_words = config.hyde_min_words or 999  # None disables HyDE
+            self.hyde_min_words = config.hyde_min_words or 999
             self._short_query_threshold = config.short_query_threshold
             self._short_query_sort_tokens = config.short_query_sort_tokens
             self._bm25_fallback_threshold = config.bm25_fallback_threshold
@@ -1062,10 +792,7 @@ class AgenticRAG:
 
         self._domain_hint: str = ""
         self._field_values_cache: dict = {}
-        # Snippet length for quality-gate / rewrite / relevance-check LLM
-        # prompts. Auto-configured from sample-doc analysis; short product
-        # rows land around 200–400, long catalog pages / articles around
-        # 1000–2000. Env var as an escape hatch.
+
         self._preview_chars: int = int(os.getenv("RAG_PREVIEW_CHARS", "400"))
 
         if auto_strategy:
@@ -1073,7 +800,7 @@ class AgenticRAG:
 
         self._index_config = self.backend.get_index_config()
 
-        _ck = self._chain_llm  # applies prompt_cache_key for non-Azure OpenAI
+        _ck = self._chain_llm
         self._search_query_chain = _ck(self._llm, "rewrite").with_structured_output(
             SearchQuery, method="json_schema"
         )
@@ -1083,18 +810,18 @@ class AgenticRAG:
         self._multi_query_chain = _ck(self._llm, "multi-query").with_structured_output(
             MultiQuery, method="json_schema"
         )
-        self._filter_intent_chain = _ck(self._llm, "filter-intent").with_structured_output(
-            FilterIntent, method="json_schema"
-        )
-        self._select_collection_chain = _ck(self._llm, "select-collection").with_structured_output(
-            CollectionIntent, method="json_schema"
-        )
+        self._filter_intent_chain = _ck(
+            self._llm, "filter-intent"
+        ).with_structured_output(FilterIntent, method="json_schema")
+        self._select_collection_chain = _ck(
+            self._llm, "select-collection"
+        ).with_structured_output(CollectionIntent, method="json_schema")
         self._relevance_chain = _ck(self._llm, "relevance").with_structured_output(
             RelevanceCheck, method="json_schema"
         )
-        self._reasoning_chain = _ck(self._thinking_llm, "reasoning").with_structured_output(
-            ReasoningVerdict, method="json_schema"
-        )
+        self._reasoning_chain = _ck(
+            self._thinking_llm, "reasoning"
+        ).with_structured_output(ReasoningVerdict, method="json_schema")
         self._grade_chain = _ck(self._grader_llm, "grader").with_structured_output(
             AnswerGrade, method="json_schema"
         )
@@ -1109,7 +836,6 @@ class AgenticRAG:
 
     @property
     def base_filter(self) -> str | None:
-        """Deprecated alias for ``self.filter``."""
         warnings.warn(
             "`base_filter` attribute is deprecated, use `filter` instead.",
             DeprecationWarning,
@@ -1127,12 +853,6 @@ class AgenticRAG:
         self.filter = value
 
     def _auto_configure(self, override_hyde_min_words: bool = True) -> None:
-        """Sample the corpus, then ask an LLM to pick retrieval strategy.
-
-        Results are cached at ``~/.cache/rag7/auto_<schema-hash>.json``
-        keyed by the index schema shape, so subsequent initialisations
-        against the same corpus skip the LLM call entirely.
-        """
         try:
             sample = self.backend.sample_documents(
                 limit=15,
@@ -1154,13 +874,8 @@ class AgenticRAG:
             if max_doc_chars > self.rerank_chars:
                 self.rerank_chars = min(8192, int(max_doc_chars * 1.2))
 
-            # Auto-detect the primary name/group fields from the backend's
-            # searchable_attributes ordering. This powers the rerank boost
-            # that promotes docs matching the query in their name_field
-            # over docs that only match in category/group fields.
             self._infer_name_and_group_fields(sample)
 
-            # Cache by schema shape — same index + same doc keys ≈ same strategy.
             schema_sig = self._schema_signature(sample)
             cached = _auto_cache_load(schema_sig)
             if cached is not None:
@@ -1227,10 +942,7 @@ class AgenticRAG:
                 self.semantic_ratio = float(config["semantic_ratio"])
             if "fusion" in config and config["fusion"] in ("rrf", "dbsf"):
                 self.fusion = config["fusion"]
-            # Post-LLM heuristic: when vector weight is meaningful, DBSF's
-            # distribution-based normalization beats RRF — BM25 and vector
-            # score ranges differ too much for rank-only fusion to handle
-            # well. LLM tends to default to 'rrf'; correct that here.
+
             if self.semantic_ratio >= 0.35:
                 self.fusion = "dbsf"
             if "enable_filter_intent" in config:
@@ -1248,7 +960,7 @@ class AgenticRAG:
                     )
                 except (ValueError, TypeError):
                     pass
-            # Token sort is cheap and paraphrase-invariant — always on.
+
             self._short_query_sort_tokens = True
             label = (
                 ",".join(sorted(self.collections.keys()))
@@ -1260,12 +972,6 @@ class AgenticRAG:
             print(f"  [{self.index}] auto-strategy failed ({e}), using defaults")
 
     def _infer_name_and_group_fields(self, sample: list[dict]) -> None:
-        """Pick name_field / group_field from the backend's searchable attrs.
-
-        ``name_field`` is the first string attr that looks human-readable
-        (``*_name`` or the first non-ID searchable attr). ``group_field`` is
-        the first attr matching group/category/class naming.
-        """
         if self.name_field and self.group_field:
             return
         try:
@@ -1288,7 +994,6 @@ class AgenticRAG:
             return isinstance(v, str) and len(v.strip()) > 0
 
         if not self.name_field:
-            # Prefer attributes ending in "_name", else first non-ID string attr.
             candidates = [
                 a for a in attrs if a.lower().endswith("_name") and _is_string_field(a)
             ]
@@ -1313,11 +1018,6 @@ class AgenticRAG:
                 self.group_field = candidates[0]
 
     def _schema_signature(self, sample: list[dict]) -> str:
-        """Stable hash of index + doc shape + filterable attributes.
-
-        Same corpus → same signature → same cache hit. Changes only when
-        the schema itself changes (new fields, new index, etc.).
-        """
         import hashlib
 
         doc_keys = sorted({k for d in sample[:5] for k in d.keys()})
@@ -1325,9 +1025,7 @@ class AgenticRAG:
             filterable = sorted(self.backend.get_index_config().filterable_attributes)
         except Exception:
             filterable = []
-        # In multi-collection mode the primary self.index is only the first
-        # name; include every configured collection so the cache keys a
-        # different strategy per (DE,FR) union vs. DE alone.
+
         if self.collections:
             index_sig = ",".join(sorted(self.collections.keys()))
         else:
@@ -1341,23 +1039,8 @@ class AgenticRAG:
         return SystemMessage(prompt)
 
     def _hit_to_text(self, h: dict) -> str:
-        """Render a hit as clean YAML-ish text for the reranker + LLM.
-
-        Every non-trivial field is emitted (minus ids/URLs/language) so
-        structured attributes (akeneo_values, specs, stock info) reach
-        the ranker. Lists render as indented bullet lines, nested dicts
-        as indented key/value, and HTML tags are stripped — clean prose
-        scores better than raw Python reprs on reranker models (see
-        improvingagents.com/blog/best-nested-data-format, YAML>JSON>XML).
-        """
         content = h.get("content")
-        # Render every field, then emit shortest → longest so the
-        # reranker's rerank_chars window catches short dense fields
-        # (article_name, supplier, category, search terms, spec pairs)
-        # before any remaining bulky ones. List values are already capped
-        # at _MAX_LIST_ITEMS, but ordering still matters: without it, e.g.
-        # akeneo_values ends up after stock_data in dict insertion order
-        # and search-relevant spec content gets truncated.
+
         rendered_items: list[tuple[int, str]] = []
         for k, v in h.items():
             if k in _SKIP_FIELDS or k == "content" or v is None or v == "":
@@ -1429,9 +1112,15 @@ class AgenticRAG:
     def _cached_batch_search(self, requests: "list[Any]") -> "list[list[dict]]":
         key = tuple(
             (
-                r.query, r.limit, r.semantic_ratio, r.filter_expr or "",
+                r.query,
+                r.limit,
+                r.semantic_ratio,
+                r.filter_expr or "",
                 tuple(r.sort_fields) if r.sort_fields else (),
-                r.show_ranking_score, r.matching_strategy, r.embedder_name, r.index_uid or "",
+                r.show_ranking_score,
+                r.matching_strategy,
+                r.embedder_name,
+                r.index_uid or "",
             )
             for r in requests
         )
@@ -1451,7 +1140,7 @@ class AgenticRAG:
     ) -> list[Document]:
         limit = int(self.top_k * self.retrieval_factor)
         vecs: list[list[float] | None] = vectors if vectors else [None] * len(queries)
-        # lang filter and explicit filter_expr can be combined
+
         parts = [p for p in [f"language = {lang}" if lang else None, filter_expr] if p]
         combined_filter = " AND ".join(f"({p})" for p in parts) if parts else None
 
@@ -1468,8 +1157,7 @@ class AgenticRAG:
 
     async def _apreprocess(self, state: RAGState) -> RAGState:
         t0 = time.perf_counter()
-        # Fully-disabled preprocess short-circuits to the raw question with
-        # stop-word stripping only — no LLM call, no token sort, no variants.
+
         if not self._enable_preprocess_llm:
             raw = _strip_stop_words(state.question) or state.question
             new = state.model_copy(
@@ -1482,21 +1170,14 @@ class AgenticRAG:
             )
             self._trace(new, "preprocess", t0, path="disabled", query=raw)
             return new
-        # Short, keyword-like questions usually don't benefit from LLM
-        # rewrite — but when a short query contains a filter-intent word
-        # (von / de / from / ohne / sans / ...) it likely has a brand or
-        # category filter that needs synonym expansion to reach the
-        # target (e.g. "bieröffner von proone" → needs "flaschenöffner"
-        # variant). In that case fall through to the LLM path.
+
         words = state.question.split()
         has_filter_word = any(
             w.lower().strip("?,!.") in self._filter_intent_words for w in words
         )
         if len(words) <= self._short_query_threshold and not has_filter_word:
             raw = _strip_stop_words(state.question) or state.question
-            # Normalize token order for product-name queries so paraphrase variants
-            # ("Sand gewaschen 0-4mm" vs "Sand 0-4mm gewaschen") resolve to the
-            # same canonical BM25 query and thus retrieve the same candidate set.
+
             if self._short_query_sort_tokens:
                 tokens = raw.split()
                 if len(tokens) > 1:
@@ -1516,7 +1197,9 @@ class AgenticRAG:
             try:
                 result = SearchQuery.model_validate(cached)
                 raw = _strip_stop_words(state.question)
-                variants = _filter_bohrer_variants(state.question, result.query, result.variants[:3])
+                variants = _filter_bohrer_variants(
+                    state.question, result.query, result.variants[:3]
+                )
                 if raw and raw.lower() != result.query.lower():
                     variants = [raw] + variants
                 updates: dict = {
@@ -1584,7 +1267,9 @@ class AgenticRAG:
                 value=result.model_dump(),
             )
             raw = _strip_stop_words(state.question)
-            variants = _filter_bohrer_variants(state.question, result.query, result.variants[:3])
+            variants = _filter_bohrer_variants(
+                state.question, result.query, result.variants[:3]
+            )
             if raw and raw.lower() != result.query.lower():
                 variants = [raw] + variants
             updates: dict = {
@@ -1623,15 +1308,6 @@ class AgenticRAG:
         adaptive_fusion: str | None = None,
         hyde_text: str | None = None,
     ) -> tuple[list[Document], bool]:
-        """Return ``(docs, bm25_empty)``.
-
-        ``bm25_empty`` is True when every BM25-only arm (i.e. each request
-        without a vector) returned zero hits. That's the typo/OOV rescue
-        signal: the query terms literally aren't in the corpus, so the
-        caller should fall back to an LLM rewrite via ``_aswarm_retrieve``.
-        Pure vector hits can still fill ``docs`` with semantically-adjacent
-        noise, which we don't want to block the rescue.
-        """
         limit = int(self.top_k * (factor or self.retrieval_factor))
         hyde_source = question or query
 
@@ -1670,10 +1346,7 @@ class AgenticRAG:
             )
 
         requests = [_req(query)]
-        # Only add a second BM25 arm when hyde_bm25 differs from the primary
-        # query (i.e. HyDE generated a longer doc-like text). When they are
-        # the same the second arm is a duplicate that double-counts the primary
-        # BM25 result in RRF fusion, unfairly outweighing variant/vector arms.
+
         if hyde_bm25 != query:
             requests.append(_req(hyde_bm25))
         requests.append(_req(query, vector=vector, semantic_ratio=hybrid_ratio))
@@ -1725,13 +1398,6 @@ class AgenticRAG:
             print(msg, file=sys.stderr, flush=True)
 
     async def _acontextualize(self, state: RAGState) -> RAGState:
-        """Rewrite a follow-up question into a standalone query using history.
-
-        Without this, retrieval for "and the 18V one?" searches just those
-        four words — ignoring that the previous turn was about Makita
-        drills. Only fires when history is non-empty and the question is
-        short enough to likely be a follow-up. No-op otherwise.
-        """
         if not state.history or len(state.question.split()) > 10:
             return state
         last = state.history[-1]
@@ -1761,11 +1427,7 @@ class AgenticRAG:
 
     async def _aparallel_start(self, state: RAGState) -> RAGState:
         t0 = time.perf_counter()
-        # When there's no history, contextualize is a no-op and the question
-        # won't be rewritten — so we can kick off filter-intent detection
-        # against the original question in parallel with preprocess, avoiding
-        # a serial LLM hop in _aretrieve_node. With history, contextualize may
-        # rewrite the question, so we must wait before triggering filter-intent.
+
         intent_task: asyncio.Task[FilterIntent] | None = None
         if not state.history and state.filter_intent is None:
             intent_task = asyncio.create_task(
@@ -1797,14 +1459,10 @@ class AgenticRAG:
         t0 = time.perf_counter()
         state = await self._aroute_collections(state)
 
-        # Generate query variants AND detect filter intent in parallel.
-        # Prefer precomputed variants from the preprocessor (state.query_variants)
-        # when available — they include synonym expansions (e.g. "Flaschenöffner"
-        # for "Bieröffner") that the cached multi-query LLM call may not have.
         async def _gen_variants() -> list[str]:
             if state.query_variants:
                 base = state.query_variants[: self.n_swarm_queries]
-                # Prepend rewritten query if it differs and isn't already there
+
                 rewritten = state.query
                 if rewritten and rewritten != state.question and rewritten not in base:
                     base = [rewritten] + base[: self.n_swarm_queries - 1]
@@ -1886,12 +1544,6 @@ class AgenticRAG:
         return new
 
     async def _aretrieve_node(self, state: RAGState) -> RAGState:
-        """Delegate to _aretrieve_documents so chat and --retriever share one pipeline.
-
-        Keeps the graph's iteration/rewrite loop functional: each iteration
-        asks for a larger pool so the LLM rewrite path has fresh candidates.
-        The returned docs are already reranked — downstream rerank is idempotent.
-        """
         t0 = time.perf_counter()
         factor = (
             self.retrieval_factor * 2
@@ -1900,9 +1552,7 @@ class AgenticRAG:
         )
         pool = max(self.top_k * factor, self.rerank_top_n * 4)
         query, docs = await self._aretrieve_documents(state.question, top_k=pool)
-        # Don't throw away good first-pass docs when a retry retrieval returns
-        # nothing. Quality gate rejects → rewrite → empty second-pass would
-        # replace valid candidates with [], leading to a cascading give_up.
+
         if not docs and state.documents:
             docs = state.documents
         new = state.model_copy(
@@ -1931,8 +1581,7 @@ class AgenticRAG:
         precomputed: FilterIntent | None = None,
         variants: list[str] | None = None,
     ) -> tuple[FilterIntent | None, list[Document]]:
-        # Reuse an intent already detected upstream (e.g. in _aparallel_start)
-        # to skip the duplicate LLM classification call.
+
         intent = precomputed or await self._adetect_filter_intent(question)
         if not intent.field or not intent.value or not intent.operator:
             return None, []
@@ -1940,12 +1589,6 @@ class AgenticRAG:
         return intent, docs
 
     def _build_filter_expr(self, intent: FilterIntent) -> str:
-        """Build a filter expression in the active backend's dialect.
-
-        Delegates to backend.build_filter_expr so SQL backends (LanceDB,
-        DuckDB, pgvector) get SQL syntax with ILIKE, Azure gets OData, and
-        Meili keeps its CONTAINS-based syntax.
-        """
         return self.backend.build_filter_expr(intent)
 
     async def _afilter_search_from_intent(
@@ -1964,12 +1607,6 @@ class AgenticRAG:
             except Exception:
                 pass
 
-        # When a filter already pins the brand/category, strip that token
-        # from variant queries so BM25 can match on the remaining keywords
-        # alone. Default matching strategy requires ALL tokens, and docs
-        # often have the brand in supplier but NOT in searchable_attrs
-        # (e.g. 7794905 ProOne Multi-Tool has "proone" in search_term but
-        # not "flaschenöffner") — keeping both tokens filters it out.
         filter_token = intent.value.lower().strip() if intent.value else ""
 
         def _strip_filter_token(q: str) -> str:
@@ -1979,9 +1616,7 @@ class AgenticRAG:
             return " ".join(parts) if parts else q
 
         async def _search(expr: str) -> list[dict]:
-            # Multi-arm search if variants are supplied — lets a rewrite
-            # like "bieröffner" → "flaschenöffner" reach the filtered pool
-            # even though the raw query has no literal hits.
+
             all_queries = [query] + [v for v in (variants or []) if v and v != query]
             stripped = [_strip_filter_token(q) for q in all_queries]
             seen: set[str] = set()
@@ -1990,9 +1625,7 @@ class AgenticRAG:
                 if q and q not in seen:
                     seen.add(q)
                     unique.append(q)
-            # Cap at 3 arms. Keep the main query arm first (holds the semantic
-            # vector); then prefer longer (more specific) stripped variants over
-            # short generic ones (e.g. "Bieröffner Flaschenöffner" beats "Öffner").
+
             if len(unique) > 3:
                 unique = unique[:1] + sorted(unique[1:], key=lambda s: -len(s))[:2]
             vecs: list[list[float] | None] = [vector] + [None] * (len(unique) - 1)
@@ -2012,10 +1645,6 @@ class AgenticRAG:
             except Exception:
                 return []
 
-        # Try the literal brand filter first. Only fall back to an
-        # is_own_brand OR merge when the literal filter came back thin —
-        # otherwise for external-supplier brands like "Wedi", merging in
-        # own-brand hits dilutes recall with unrelated Bauplatte SKUs.
         hits = await _search(filter_expr)
         if (
             self._has_own_brand_field
@@ -2037,9 +1666,7 @@ class AgenticRAG:
         ]
 
     def _make_rerank_docs(self, docs: list[Document]) -> list[str]:
-        # Use structured rendering (identity fields + akeneo first) so the
-        # reranker sees product descriptions within rerank_chars even when
-        # _hit_to_text's shortest→longest ordering would push them past the cutoff.
+
         return [_doc_to_grader_text(d)[: self.rerank_chars] for d in docs]
 
     def _apply_boost(
@@ -2055,9 +1682,7 @@ class AgenticRAG:
             top_doc_idx = max(indexed, key=lambda p: p[1])[0]
             top_name = (docs[top_doc_idx].metadata.get(self.name_field) or "").lower()
             q_tokens = [t for t in query.lower().split() if len(t) > 3]
-            # Require multi-token match to call it "confident" — single-token
-            # queries like "trockenbeton" match every near-duplicate, killing
-            # commercial tiebreaks. Need at least 2 tokens hit AND a majority.
+
             hits = sum(1 for t in q_tokens if t in top_name)
             confident = len(q_tokens) >= 2 and hits >= 2 and hits >= len(q_tokens) // 2
         boost = (lambda _: 1.0) if confident else self.boost_fn
@@ -2077,9 +1702,7 @@ class AgenticRAG:
                     def _tok_boost(d: Document) -> float:
                         name = (d.metadata.get(name_f, "") or "").lower()
                         hits = sum(1 for t in tokens if t in name)
-                        # Graded boost: 1.0 + boost_max * coverage_ratio.
-                        # Small default keeps rerank order stable across
-                        # paraphrase variants (no all-or-nothing flip).
+
                         return 1.0 + boost_max * (hits / len(tokens))
 
                     scored = sorted(
@@ -2149,7 +1772,6 @@ class AgenticRAG:
         documents: list[Document],
         indexed: list[tuple[int, float]],
     ) -> list[tuple[int, float]]:
-        """Rescore top-N of primary rerank output with expert reranker."""
         if not self._expert_reranker:
             return indexed
         head = indexed[: self.expert_top_n]
@@ -2184,11 +1806,9 @@ class AgenticRAG:
         if not state.documents:
             return state
         if state.pre_reranked:
-            # Graph path already ran the full retriever pipeline (which
-            # includes rerank + filter-pin); don't second-guess it.
             self._trace(state, "rerank", t0, skipped="pre_reranked")
             return state
-        # Selective skip: confident query + no filter intent + no expert → hybrid order good enough
+
         if (
             not (state.filter_intent and state.filter_intent.field)
             and not self._expert_reranker
@@ -2220,9 +1840,7 @@ class AgenticRAG:
                     )
                     self._trace(new, "rerank", t0, skipped="confident")
                     return new
-        # Cap rerank input to 2*top_k: the reranker rarely promotes a doc from
-        # retrieval rank 20+ into the top-5, so reranking the full pool (up to
-        # top_k * retrieval_factor = 40) wastes compute without recall gain.
+
         rerank_cap = max(
             int(self.top_k * self._rerank_cap_multiplier), self.rerank_top_n * 2
         )
@@ -2252,7 +1870,9 @@ class AgenticRAG:
                     )
                 results = await asyncio.wait_for(coro, timeout=self._rerank_timeout_s)
                 indexed = [(r.index, r.relevance_score) for r in results]
-                _cache.save("rerank-v1", rerank_query, tuple(rerank_docs), value=indexed)
+                _cache.save(
+                    "rerank-v1", rerank_query, tuple(rerank_docs), value=indexed
+                )
             if self._expert_reranker and len(indexed) >= 2:
                 scores = sorted((s for _, s in indexed), reverse=True)
                 top1 = scores[0]
@@ -2315,7 +1935,9 @@ class AgenticRAG:
             "Say so if the context is insufficient."
         )
         if state.grader_feedback:
-            sys_content += f"\n\nSearch guidance for this attempt: {state.grader_feedback}"
+            sys_content += (
+                f"\n\nSearch guidance for this attempt: {state.grader_feedback}"
+            )
         messages: list = [self._sys(sys_content)]
         for turn in state.history:
             messages.append(HumanMessage(turn.question))
@@ -2325,8 +1947,7 @@ class AgenticRAG:
         )
         response = await self._gen_llm.ainvoke(messages)
         update: dict[str, Any] = {"answer": str(response.content)}
-        # Don't persist retrieved documents in the checkpoint — they're
-        # re-fetched on every call. Keeps checkpointed state lean.
+
         if self._checkpointer is not None:
             update["documents"] = []
         new = state.model_copy(update=update)
@@ -2342,8 +1963,6 @@ class AgenticRAG:
     async def _arewrite(self, state: RAGState) -> RAGState:
         t0 = time.perf_counter()
         if not state.documents and not self._enable_swarm_grade:
-            # When swarm_grade is active, the swarm_grade node handles retrieval —
-            # just preprocess and return; don't call _aswarm_retrieve here.
             if state.adaptive_semantic_ratio is None:
                 pre = await self._apreprocess(state)
                 state = state.model_copy(
@@ -2537,19 +2156,13 @@ class AgenticRAG:
             )
             return new
 
-        # Trust reranker only when BM25 top-1 score is high. When the filter
-        # has narrowed to a category with no real text match (e.g.
-        # "bieröffner von proone" narrows to all ProOne docs but none
-        # actually sells bottle openers), the top score is mediocre (~0.5)
-        # even though we have a full top_k window — fall through to the LLM
-        # gate so it can detect off-topic results.
         top_score = 0.0
         if state.documents:
             top_score = float(
                 state.documents[0].metadata.get("_rankingScore", 0.0) or 0.0
             )
         if (
-            state.filter_intent is None  # filter queries need LLM check to detect wrong product type
+            state.filter_intent is None
             and state.iterations <= 1
             and len(state.documents) >= self.top_k
             and top_score >= 0.7
@@ -2564,8 +2177,6 @@ class AgenticRAG:
                 top_score=top_score,
             )
             return new
-
-        # Iter 1: strict quality assessment — no shortcut.
 
         snippets = "\n\n".join(
             f"[{i + 1}] {d.page_content[: self._preview_chars]}"
@@ -2648,8 +2259,6 @@ class AgenticRAG:
             self._trace(state, "final_grade", t0, path="error", error=err)
             return state
 
-        # confidence: 1.0=correct, 0.0=wrong. Retry on confident wrong judgment
-        # (conf >= threshold) OR clearly wrong (conf <= 1-threshold).
         should_retry = not grade.sufficient and (
             grade.confidence >= self._final_grade_threshold
             or grade.confidence <= 1.0 - self._final_grade_threshold
@@ -2672,7 +2281,6 @@ class AgenticRAG:
     async def _agrade_docs(
         self, question: str, docs: list[Document]
     ) -> "AnswerGrade | None":
-        """Grade retrieved docs without generating an answer — used by swarm_grade."""
         snippets = "\n\n".join(
             f"[{i + 1}] {d.page_content[: self._preview_chars]}"
             for i, d in enumerate(docs[:5])
@@ -2701,7 +2309,6 @@ class AgenticRAG:
             return None
 
     async def _aswarm_preprocess(self, state: RAGState) -> RAGState:
-        """First-pass preprocessing for swarm_grade (mirrors _aparallel_start)."""
         if not state.history and state.filter_intent is None:
             intent_task: asyncio.Task[FilterIntent] | None = asyncio.create_task(
                 self._adetect_filter_intent(state.question)
@@ -2722,7 +2329,6 @@ class AgenticRAG:
     async def _agen_swarm_variants(
         self, state: RAGState
     ) -> tuple[list[str], list[list[float] | None], str | None]:
-        """Generate query variants, embeddings, and filter expression for swarm arms."""
         seed = state.query or state.question
 
         async def _variants() -> list[str]:
@@ -2746,7 +2352,12 @@ class AgenticRAG:
                 )
                 queries = result.queries[: self.n_swarm_queries] or [seed]
                 if result.queries:
-                    _cache.save("multi-query-v1", self.n_swarm_queries, seed, value=result.queries)
+                    _cache.save(
+                        "multi-query-v1",
+                        self.n_swarm_queries,
+                        seed,
+                        value=result.queries,
+                    )
                 return queries
             except Exception:
                 return [seed]
@@ -2766,13 +2377,15 @@ class AgenticRAG:
             except Exception:
                 pass
 
-        has_filter = filter_intent.field and filter_intent.value and filter_intent.operator
+        has_filter = (
+            filter_intent.field and filter_intent.value and filter_intent.operator
+        )
         f_expr = (
             f'{filter_intent.field} {filter_intent.operator} "{filter_intent.value}"'
             if has_filter
             else None
         )
-        # Persist detected intent back into state (caller merges)
+
         return queries, vectors, f_expr
 
     async def _aarm_retrieve(
@@ -2782,11 +2395,6 @@ class AgenticRAG:
         vec: list[float] | None,
         f_expr: str | None,
     ) -> tuple[list[Document], str]:
-        """One arm: search + rerank for a single query variant.
-
-        Falls back to broad search (no filter) when the filtered query returns
-        nothing — mirrors the broad+filtered parallel pattern in _aswarm_retrieve.
-        """
         loop = asyncio.get_running_loop()
         docs = await loop.run_in_executor(
             None,
@@ -2811,12 +2419,6 @@ class AgenticRAG:
         f_expr: str | None,
         t0: float,
     ) -> RAGState:
-        """Race N retrieval arms; grade each as it finishes; stop on first hit.
-
-        Arms are independent — no arm waits for siblings. First arm whose docs
-        pass the grader wins; remaining arms are cancelled immediately.
-        On all-miss, merged fallback docs + best suggestion set for rewrite.
-        """
         tasks = [
             asyncio.create_task(
                 self._aarm_retrieve(state.question, queries[i], vectors[i], f_expr)
@@ -2829,7 +2431,9 @@ class AgenticRAG:
         best_confidence: float = 0.0
 
         while pending:
-            done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+            done, pending = await asyncio.wait(
+                pending, return_when=asyncio.FIRST_COMPLETED
+            )
             for task in done:
                 try:
                     arm_docs, arm_query = task.result()
@@ -2858,8 +2462,13 @@ class AgenticRAG:
                         }
                     )
                     self._trace(
-                        new, "swarm_grade", t0,
-                        path="hit", conf=grade.confidence, docs=len(arm_docs), arm=arm_query,
+                        new,
+                        "swarm_grade",
+                        t0,
+                        path="hit",
+                        conf=grade.confidence,
+                        docs=len(arm_docs),
+                        arm=arm_query,
                     )
                     return new
 
@@ -2879,16 +2488,12 @@ class AgenticRAG:
                 "quality_ok": False,
             }
         )
-        self._trace(new, "swarm_grade", t0, path="miss", conf=best_confidence, docs=len(merged))
+        self._trace(
+            new, "swarm_grade", t0, path="miss", conf=best_confidence, docs=len(merged)
+        )
         return new
 
     async def _aswarm_grade_node(self, state: RAGState) -> RAGState:
-        """Parallel diverse retrieval — BM25-heavy and semantic-heavy arms in parallel.
-
-        Runs two _aswarm_retrieve calls concurrently with different semantic ratios
-        to maximise recall diversity on retry. Merges results via RRF.
-        Quality decisions stay with final_grade (answer grading).
-        """
         t0 = time.perf_counter()
 
         async def _arm_with_ratio(ratio: float) -> list[Document]:
@@ -2899,10 +2504,14 @@ class AgenticRAG:
             return result.documents
 
         bm25_docs, semantic_docs = await asyncio.gather(
-            _arm_with_ratio(0.05),   # BM25-heavy: catches exact keyword/typo matches
-            _arm_with_ratio(0.95),   # Semantic-heavy: catches synonyms and paraphrases
+            _arm_with_ratio(0.05),
+            _arm_with_ratio(0.95),
         )
-        merged = self._merge_doc_lists(bm25_docs, semantic_docs) if (bm25_docs or semantic_docs) else state.documents
+        merged = (
+            self._merge_doc_lists(bm25_docs, semantic_docs)
+            if (bm25_docs or semantic_docs)
+            else state.documents
+        )
         new = state.model_copy(
             update={"documents": merged, "iterations": state.iterations + 1}
         )
@@ -2929,9 +2538,7 @@ class AgenticRAG:
         return "give_up" if state.iterations >= self.max_iter else "rewrite"
 
     def _reason_route(self, state: RAGState) -> Literal["reason", "quality_gate"]:
-        # Exclusion intents (NOT_CONTAINS/!=) always go through reason, even
-        # when general reasoning is disabled — cheap check, critical for "X
-        # aber nicht von Y" queries where the reranker can't filter by operator.
+
         intent = state.filter_intent
         if intent and intent.operator in ("NOT_CONTAINS", "!="):
             return "reason" if self._needs_reasoning(state) else "quality_gate"
@@ -2946,7 +2553,6 @@ class AgenticRAG:
         store: Any = None,
         config: RunnableConfig | None = None,
     ) -> dict:
-        """Inject long-term memories into state trace before retrieval."""
         if self._mem0_memory is not None:
             return await self._aread_mem0(state, config=config)
         if store is None:
@@ -2974,7 +2580,6 @@ class AgenticRAG:
         store: Any = None,
         config: RunnableConfig | None = None,
     ) -> dict:
-        """Distil and save key facts from this exchange for future conversations."""
         if self._mem0_memory is not None:
             return await self._awrite_mem0(state, config=config)
         if store is None or not state.answer:
@@ -3112,7 +2717,6 @@ class AgenticRAG:
             {"generate": "generate", "rewrite": "rewrite", "give_up": "give_up"},
         )
         if self._enable_swarm_grade:
-            # swarm_grade = parallel retrieval arms, replaces serial rewrite→retrieve
             g.add_conditional_edges(
                 "swarm_grade",
                 self._route,
@@ -3178,7 +2782,7 @@ class AgenticRAG:
             self._tools,
             system_prompt=system_prompt,
             store=self._memory_store,
-            middleware=[  # ty: ignore[invalid-argument-type]
+            middleware=[
                 ToolCallLimitMiddleware(run_limit=10, exit_behavior="end"),  # type: ignore[arg-type]
                 ToolRetryMiddleware(
                     max_retries=5,
@@ -3205,7 +2809,6 @@ class AgenticRAG:
     def _sample_field_values(
         self, fields: list[str], limit: int = 100
     ) -> dict[str, list]:
-        """Sample real stored values for filterable fields (like agent's get_filter_values)."""
         cache_key = tuple(fields)
         cached = self._field_values_cache.get(cache_key)
         if cached is not None:
@@ -3240,21 +2843,13 @@ class AgenticRAG:
         if not filterable:
             return FilterIntent(field=None, value="", operator="")
 
-        # Skip LLM if no structured filter targets exist — id/content/text are
-        # not real filter axes, filtering them is a substring match on the body.
         _GENERIC = {"id", "_id", "content", "text", "body", "document", "doc"}
         if all(f.lower() in _GENERIC for f in filterable):
             return FilterIntent(field=None, value="", operator="")
 
-        # Cheap heuristic pre-filter: skip LLM if no entity-like signal.
-        # Entity signals: capitalized word (not sentence-start), standalone numeric
-        # token (year/version), or uppercase code. Embedded digits (bm25, oauth2)
-        # are technical jargon, not entities — don't count them.
         words = question.strip().split()
-        # Strong signals: numeric tokens (years/sizes/IDs), all-caps codes (M12, SDS),
-        # or lowercase product codes like m12/t25/g10 (single letter + 2+ digits).
-        # Lowercase codes are common in casual user queries ("hilti anker bolzen m12").
-        _is_product_code = re.compile(r'^[a-z]\d{2,}$')
+
+        _is_product_code = re.compile(r"^[a-z]\d{2,}$")
         has_strong_signal = any(
             (w and w[0].isdigit())
             or (len(w) >= 3 and w.isupper())
@@ -3266,12 +2861,7 @@ class AgenticRAG:
             for i, w in enumerate(words)
         )
         has_filter_word = any(w.lower() in self._filter_intent_words for w in words)
-        # Short queries (≤3 words) without an explicit filter-intent word
-        # ("von"/"ohne"/"from"/"without"/…) are almost always keyword bags —
-        # users dropping "Bosch Winkelschleifer 125mm" aren't asking for a
-        # brand filter, they want that product. Skip the LLM classifier.
-        # 4+ word queries may contain lowercase brand mentions in natural prose,
-        # so we still run the LLM when there's some entity-like signal.
+
         if len(words) <= 3:
             if not has_filter_word:
                 return FilterIntent(field=None, value="", operator="")
@@ -3285,15 +2875,13 @@ class AgenticRAG:
             except Exception:
                 pass
 
-        # Sample real stored values so the LLM can match entities precisely
         loop = asyncio.get_running_loop()
         field_values = await loop.run_in_executor(
             None, self._sample_field_values, filterable
         )
 
         values_block = "\n".join(
-            f"  {field}: {vals[:30]}"  # show up to 30 sample values
-            for field, vals in field_values.items()
+            f"  {field}: {vals[:30]}" for field, vals in field_values.items()
         )
 
         try:
@@ -3373,9 +2961,9 @@ class AgenticRAG:
         )
         if neg_m and intent.operator not in ("NOT_CONTAINS", "!="):
             raw_entity = neg_m.group(1).strip()
-            # Split on "oder"/"or"/"ou" for multi-brand exclusion
+
             parts = re.split(r"\s+(?:oder|or|ou)\s+", raw_entity, flags=re.IGNORECASE)
-            # Strip trailing clauses like "und keine Eigenmarke"
+
             cleaned = []
             for p in parts:
                 p = re.sub(
@@ -3398,11 +2986,6 @@ class AgenticRAG:
         return intent
 
     async def _aselect_collections(self, question: str) -> list[str]:
-        """Ask the LLM which collection(s) to route the query to.
-
-        Returns a list of collection names. Falls back to all collections on
-        error, empty selection, or when only a single collection is registered.
-        """
         if not self.collections:
             return []
         all_names = list(self.collections.keys())
@@ -3456,14 +3039,6 @@ class AgenticRAG:
         filter_docs: list[Document],
         pin_to: int = 5,
     ) -> list[Document]:
-        """Ensure the top ``pin_to`` filter_docs are in the final top ``pin_to``.
-
-        Cohere sometimes demotes exact filter hits below reranker-favoured
-        siblings. When a filter fired with a confident value, trust it:
-        promote the top-``pin_to`` filter_docs into the final top-``pin_to``
-        while keeping overall Cohere order for everything else. Returns
-        the same object if no change was needed (cheap check).
-        """
         if not ranked or not filter_docs:
             return ranked
         ranked_ids = [_doc_id(d.metadata) for d in ranked]
@@ -3471,8 +3046,7 @@ class AgenticRAG:
         need = [wid for wid in want_ids if wid not in set(ranked_ids[:pin_to])]
         if not need:
             return ranked
-        # Rebuild: filter_docs top that are missing from ranked top, then
-        # preserve reranker order excluding duplicates.
+
         id_to_doc: dict[str, Document] = {_doc_id(d.metadata): d for d in filter_docs}
         for d in ranked:
             id_to_doc.setdefault(_doc_id(d.metadata), d)
@@ -3542,7 +3116,6 @@ class AgenticRAG:
             return RelevanceCheck(makes_sense=False, confidence=0.0)
 
     async def _afast_keyword_retrieve(self, query: str, limit: int) -> list[Document]:
-        """Pure BM25, no LLM, single request. Returns docs with _rankingScore."""
         loop = asyncio.get_running_loop()
         req = self._make_search_request(
             query,
@@ -3558,7 +3131,6 @@ class AgenticRAG:
     async def _aalternative_retrieve(
         self, query: str, alternative_to: str, top_k: int
     ) -> tuple[str, list[Document]]:
-        """Find similar items, excluding the referenced product."""
         limit = int(top_k * self.retrieval_factor)
         ref_docs = await self._afast_keyword_retrieve(alternative_to, 3)
         if not ref_docs:
@@ -3568,8 +3140,7 @@ class AgenticRAG:
         ref = ref_docs[0]
         ref_text = ref.page_content
         ref_id = _doc_id(ref.metadata)
-        # Category-aware rerank signal: prefer metadata category field if present,
-        # fall back to page_content. Narrow signal keeps rerank on category, not brand.
+
         ref_category = ""
         for f in self.category_fields:
             v = ref.metadata.get(f)
@@ -3610,28 +3181,26 @@ class AgenticRAG:
         k = top_k or self.top_k
         limit = int(k * self.retrieval_factor)
 
-        # Fast path: cheap keyword search; if top-score confident → rerank + return.
-        # BUT skip fast-accept when the query has a filter-intent word
-        # ("von", "de", "from", etc.) — these queries want brand/category
-        # filtering that the fast path can't do, and fast-accept would
-        # bypass the filter-search + pin logic entirely.
+        # Pure product-code queries (EAN, GTIN, article IDs) — direct BM25 lookup,
+        # no LLM, no HyDE, no reranking. Fall through if nothing found.
+        q_stripped = query.strip()
+        if _PRODUCT_CODE_RE.match(q_stripped):
+            code_docs = await self._afast_keyword_retrieve(q_stripped, limit)
+            if code_docs:
+                return q_stripped, code_docs[:k]
+
         has_filter_word = any(
             w.lower().strip("?,!.") in self._filter_intent_words for w in query.split()
         )
         fast_docs = (
-            []
-            if has_filter_word
-            else await self._afast_keyword_retrieve(query, limit)
+            [] if has_filter_word else await self._afast_keyword_retrieve(query, limit)
         )
         top_score = (
             float(fast_docs[0].metadata.get("_rankingScore", 0.0)) if fast_docs else 0.0
         )
         score_th = self._fast_accept_score
         conf_th = self._fast_accept_confidence
-        # For multi-word queries, word order changes BM25 ranking so the top
-        # keyword hit is often a different-but-plausible product. Restrict the
-        # score-based fast-accept to short queries (≤ short_query_threshold
-        # tokens) where word-order variance is negligible.
+
         is_short_query = len(query.split()) <= self._short_query_threshold
         fast_accept = (
             is_short_query
@@ -3656,19 +3225,10 @@ class AgenticRAG:
             state = await self._arerank(state)
             return state.query, state.documents[:k]
 
-        # Slow path: fan out preprocess, HyDE, filter-intent AND broad search in
-        # parallel. Broad search uses the raw query/question — when preprocess
-        # returns an LLM-refined query, we lose that refinement for broad search,
-        # but when enable_preprocess_llm is False (common) the preprocessed query
-        # is just stop-word-stripped, so we prepend that as an extra_bm25 variant
-        # via query_variants after the fact. This avoids waiting on the
-        # filter-intent LLM call (often ~1-3s) before broad search can start.
         init = RAGState(question=query, query=query)
         preprocess_task = asyncio.create_task(self._apreprocess(init))
         hyde_task = asyncio.create_task(self._acompute_hyde(query))
-        # Intent DETECTION fires in parallel with preprocess — the LLM call
-        # is ~1-2s and independent of query rewrite. Filter SEARCH still
-        # waits for preprocess so it can use the LLM's query_variants.
+
         intent_detect_task = asyncio.create_task(self._adetect_filter_intent(query))
         state = await preprocess_task
         try:
@@ -3685,10 +3245,6 @@ class AgenticRAG:
             )
         )
 
-        # Alternative path: preprocess detected "find alternatives for X".
-        # Guard: skip when alternative_to == query — the LLM sometimes sets
-        # alternative_to to the preprocessed query itself (self-referential
-        # hallucination), which would cancel the filter branch unnecessarily.
         if state.alternative_to and state.alternative_to != state.query:
             filter_intent_task.cancel()
             hyde_task.cancel()
@@ -3698,26 +3254,18 @@ class AgenticRAG:
 
         hyde_text = await hyde_task
 
-        # When BM25 completely fails (typo / transliteration / no keyword match),
-        # fall back to near-pure semantic search to recover recall.
-        # bm25_fallback_threshold=None disables the fallback entirely.
         effective_semantic_ratio = state.adaptive_semantic_ratio
         fb_th = self._bm25_fallback_threshold
         if fb_th is not None and top_score < fb_th and effective_semantic_ratio is None:
             effective_semantic_ratio = self._bm25_fallback_semantic_ratio
-        # Add unit-space-normalized variant as first extra BM25 arm.
-        # "18 V" and "18V" tokenize differently in Meilisearch — the merged
-        # form hits product names (e.g. "DHR171RTJ 18V") that the spaced form
-        # misses entirely, improving recall for paraphrase variants.
-        unit_norm = re.sub(r"(\d+(?:\.\d+)?)\s+([A-Za-z]{1,4})\b", r"\1\2", state.question)
+
+        unit_norm = re.sub(
+            r"(\d+(?:\.\d+)?)\s+([A-Za-z]{1,4})\b", r"\1\2", state.question
+        )
         extra_bm25: list[str] = []
         if unit_norm != state.question:
             extra_bm25.append(unit_norm)
-        # When preprocessing rewrites a short keyword query (e.g. splits a
-        # compound "Ankerbolzen" → "Anker Bolzen"), also search the original
-        # form so docs indexed with the compound token are still reachable.
-        # Restricted to short queries (≤5 words) to avoid re-adding verbose
-        # natural-language questions that would produce noisy BM25 results.
+
         if (
             state.question
             and state.question != state.query
@@ -3726,30 +3274,21 @@ class AgenticRAG:
         ):
             extra_bm25.append(state.question)
         extra_bm25.extend(state.query_variants or [])
-        # For 3+ token preprocessed queries, add first+last token as an extra
-        # BM25 arm. Stripping the middle adjective ("Hammer kurzer Stiel" →
-        # "Hammer Stiel") lets semantic embeddings find component/accessory
-        # products (e.g. replacement handles) that get displaced when a
-        # descriptive adjective steers the embedding toward complete tool products.
+
         _q_tokens = state.query.split()
         if len(_q_tokens) >= 3:
             first_last = f"{_q_tokens[0]} {_q_tokens[-1]}"
             if first_last not in extra_bm25 and first_last != state.query:
                 extra_bm25.append(first_last)
-        # When preprocess keeps "Hammer" as lead noun (e.g. "Hammer kurzer Stiel"):
-        # (1) LLM variants are complete-hammer types (Schlosserhammer, Zimmermannshammer)
-        #     that dilute the handle signal in RRF → drop them
-        # (2) Primary BM25 "Hammer kurzer Stiel" misses handle articles → use
-        #     "kurzer Stiel Hammerstiel" (same query that makes the scrambled case pass)
-        # (3) Steer semantic with same query so both arms favor handles
-        # Guard: query starts with "hammer" → preprocess kept Hammer as primary concept
-        # (scrambled case produces query="kurzer Stiel Hammerstiel", starts with "kurzer")
+
         _ql = state.query.lower()
         _broad_query = state.query
         if _ql.startswith("hammer") and "stiel" in _ql and "bohr" not in _ql:
             _broad_query = "kurzer Stiel Hammerstiel"
             hyde_text = "kurzer Stiel Hammerstiel"
-            extra_bm25 = [a for a in extra_bm25 if a not in (state.query_variants or [])]
+            extra_bm25 = [
+                a for a in extra_bm25 if a not in (state.query_variants or [])
+            ]
             if state.query not in extra_bm25:
                 extra_bm25.append(state.query)
         extra_bm25 = extra_bm25[:3]
@@ -3762,56 +3301,36 @@ class AgenticRAG:
             adaptive_fusion=state.adaptive_fusion,
             hyde_text=hyde_text,
         )
-        # Always await the filter branch — it carries recall unique to the
-        # brand/category filter (e.g. "bieröffner von proone" surfaces the
-        # ProOne Multi-Tool only under supplier + is_own_brand filters).
-        # Broad search alone doesn't include those, and cancelling the
-        # filter task drops them silently.
+
         filter_docs: list[Document] = []
         filter_intent_result: FilterIntent | None = None
         try:
             filter_intent_result, filter_docs = await filter_intent_task
         except Exception:
             pass
-        # A strong filter signal (e.g. supplier = ProOne + own-brand
-        # rescue) should own the candidate pool — RRF fusion with
-        # broad_docs penalizes single-list appearances and demotes
-        # filter-exclusive hits like the ProOne Multi-Tool that only
-        # surface under the brand filter.
+
         if filter_docs and len(filter_docs) >= k:
             docs = filter_docs
         elif filter_docs:
             docs = self._merge_doc_lists(filter_docs, broad_docs)
         else:
             docs = broad_docs
-        # Merge fast-path docs for recall (cheap; dedup handled by _merge_doc_lists)
+
         if fast_docs:
             docs = self._merge_doc_lists(docs, fast_docs)
-        state = state.model_copy(update={
-            "documents": docs,
-            "iterations": 1,
-            # Propagate intent so _arerank's exclusion filter (NOT_CONTAINS/!=) fires.
-            "filter_intent": filter_intent_result,
-        })
-        # Typo/OOV rescue: every BM25 arm returned zero, so the query's
-        # literal tokens aren't in the corpus vocabulary. Vector hits may
-        # have filled `docs` with semantically-adjacent noise (especially
-        # when the query embedder differs from the ingest embedder), which
-        # would otherwise short-circuit the swarm path. Force the LLM
-        # rewrite so variants like "Flaschenöffner" for "bieröffner" get a
-        # chance to hit BM25.
-        # Also trigger when a brand/category filter was detected but returned
-        # nothing — the query term likely needs a synonym (e.g. "bieroffner"
-        # needs "Flaschenöffner" to find the ProOne Multi-Tool in the brand pool).
+        state = state.model_copy(
+            update={
+                "documents": docs,
+                "iterations": 1,
+                "filter_intent": filter_intent_result,
+            }
+        )
+
         filter_empty = filter_intent_result is not None and not filter_docs
         if not state.documents or (bm25_empty and not filter_docs) or filter_empty:
             state = await self._aswarm_retrieve(state)
         state = await self._arerank(state)
-        # When a confident filter fired (brand / supplier / category with
-        # a specific value), ensure filter_docs[0] lands in the final
-        # top-3 — Cohere sometimes demotes the exact filter hit in favor
-        # of other reranker-pleasing docs in the same brand pool. Trust
-        # the filter signal for cross-brand queries.
+
         if (
             filter_docs
             and filter_intent_result is not None
@@ -3835,12 +3354,6 @@ class AgenticRAG:
         return result if isinstance(result, RAGState) else RAGState(**result)
 
     async def astream(self, question: str):
-        """Stream answer tokens for the final generate step.
-
-        Runs the full retrieval/rerank pipeline, then yields chunks from
-        `gen_llm.astream`. Earlier pipeline latency is unchanged; only the
-        final LLM call streams for improved time-to-first-token.
-        """
         _, docs = await self._aretrieve_documents(question)
         numbered = "\n\n---\n\n".join(
             f"[{i + 1}] {d.page_content}" for i, d in enumerate(docs[: self.top_k])
