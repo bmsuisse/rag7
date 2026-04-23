@@ -1045,26 +1045,38 @@ class AgenticRAG:
     def _hit_to_text(self, h: dict) -> str:
         content = h.get("content")
 
-        rendered_items: list[tuple[int, str]] = []
+        # Use searchable_attributes order: most important fields first so they
+        # survive rerank_chars truncation and the reranker sees them before content.
+        cfg = getattr(self, "_index_config", None)
+        priority: list[str] = cfg.searchable_attributes if cfg else []
+        priority_rank = {k: i for i, k in enumerate(priority)}
+
+        priority_lines: list[tuple[int, str]] = []
+        other_items: list[tuple[int, str]] = []
+
         for k, v in h.items():
             if k in _SKIP_FIELDS or k == "content" or v is None or v == "":
                 continue
             rendered = _render_value(v, indent=0)
             if not rendered:
                 continue
-            if isinstance(v, str) and content and rendered in content:
-                continue
-            if isinstance(v, str) or "\n" not in rendered:
-                line = f"**{k}**: {rendered}"
+            line = (
+                f"**{k}**:\n{rendered}"
+                if "\n" in rendered and not isinstance(v, str)
+                else f"**{k}**: {rendered}"
+            )
+            if k in priority_rank:
+                priority_lines.append((priority_rank[k], line))
             else:
-                line = f"**{k}**:\n{rendered}"
-            rendered_items.append((len(line), line))
-        extras = [line for _, line in sorted(rendered_items, key=lambda x: x[0])]
-        if content and not extras:
-            return str(content)
-        if content:
-            return str(content) + "\n" + "\n".join(extras)
-        return "\n".join(extras)
+                # Non-priority: skip if value is already covered by content
+                if isinstance(v, str) and content and rendered in content:
+                    continue
+                other_items.append((len(line), line))
+
+        top = [line for _, line in sorted(priority_lines)]
+        rest = [line for _, line in sorted(other_items, key=lambda x: x[0])]
+        parts = top + ([str(content)] if content else []) + rest
+        return "\n".join(parts) if parts else ""
 
     def _make_search_request(
         self,
