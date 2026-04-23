@@ -1859,6 +1859,10 @@ class AgenticRAG:
                         rerank_query, state.documents, indexed
                     )
                     expert_fired = True
+            score_by_idx = {i: s for i, s in indexed}
+            for i, d in enumerate(state.documents):
+                if i in score_by_idx:
+                    d.metadata["_rerank_score"] = float(score_by_idx[i])
             ranked = self._apply_boost(state.documents, indexed, state.query)
             intent = state.filter_intent
             if intent and intent.field and ranked:
@@ -3279,7 +3283,13 @@ class AgenticRAG:
                 question=query, query=query, documents=fast_docs, iterations=1
             )
             state = await self._arerank(state)
-            return state.query, state.documents[:k]
+            top_rerank = (
+                float(state.documents[0].metadata.get("_rerank_score", 0.0))
+                if state.documents
+                else 0.0
+            )
+            if top_rerank >= 0.1:
+                return state.query, state.documents[:k]
 
         init = RAGState(question=query, query=query)
         preprocess_task = asyncio.create_task(self._apreprocess(init))
