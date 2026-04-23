@@ -104,7 +104,7 @@ def multi_query_swarm(n: int) -> str:
 
 # ---- retrieval-time grading ----
 
-_CLOSE_MATCH_BASE = (
+_CLOSE_MATCH_HEADER = (
     "You filter reranker output for semantic relevance to the user's "
     "query.\n"
     "\n"
@@ -114,13 +114,46 @@ _CLOSE_MATCH_BASE = (
     "intent?\n"
     "3. Output `keep` as 1-based indices of relevant docs.\n"
     "\n"
-    "Drop only clearly off-topic items. Fail-open (keep all) if "
-    "uncertain — lexical similarity is not uncertainty."
 )
 
+_CLOSE_MATCH_LOOSE_TAIL = (
+    "Bias toward RECALL. When in doubt, keep. A doc in the same product "
+    "category as the query is relevant even if brand, size, variant, or "
+    "model differs — the user can narrow later. Drop only when the "
+    "category is clearly wrong (e.g. query asks for a drill, doc is a "
+    "t-shirt). Lexical similarity is not uncertainty."
+)
 
-def close_match(custom_instructions: str | None = "") -> str:
-    return _append_custom(_CLOSE_MATCH_BASE, custom_instructions)
+_CLOSE_MATCH_BALANCED_TAIL = (
+    "Keep docs that match the user's intent. Borderline items (same "
+    "category, different brand or variant) should be kept unless a "
+    "clearer match exists. Drop items that are off-topic or only "
+    "lexically similar. Fail-open when genuinely uncertain."
+)
+
+_CLOSE_MATCH_STRICT_TAIL = (
+    "Keep only docs that clearly match the user's stated intent — "
+    "matching category AND matching key qualifiers the user named "
+    "(brand, type, size). Drop category-only matches when the user "
+    "named a specific brand or variant. Never drop all docs: if "
+    "nothing clearly matches, keep the single best candidate."
+)
+
+_CLOSE_MATCH_TAILS: dict[str, str] = {
+    "loose": _CLOSE_MATCH_LOOSE_TAIL,
+    "balanced": _CLOSE_MATCH_BALANCED_TAIL,
+    "strict": _CLOSE_MATCH_STRICT_TAIL,
+}
+
+_CLOSE_MATCH_BASE = _CLOSE_MATCH_HEADER + _CLOSE_MATCH_LOOSE_TAIL
+
+
+def close_match(
+    custom_instructions: str | None = "",
+    strictness: str = "loose",
+) -> str:
+    tail = _CLOSE_MATCH_TAILS.get(strictness, _CLOSE_MATCH_LOOSE_TAIL)
+    return _append_custom(_CLOSE_MATCH_HEADER + tail, custom_instructions)
 
 
 # Backwards-compatible alias — existing callers that import CLOSE_MATCH

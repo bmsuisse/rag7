@@ -754,6 +754,7 @@ class AgenticRAG:
             self._final_grade_threshold = config.final_grade_threshold
             self._enable_swarm_grade = config.enable_swarm_grade
             self._enable_close_match_grader = bool(config.enable_close_match_grader)
+            self._close_match_strictness: str = config.close_match_strictness
             self._rerank_timeout_s = config.rerank_timeout_s
             self._llm_timeout_s = config.llm_timeout_s
             self.max_iter = config.max_iter
@@ -804,6 +805,7 @@ class AgenticRAG:
             self._enable_close_match_grader = bool(
                 int(os.getenv("RAG_ENABLE_CLOSE_MATCH_GRADER", "1"))
             )
+            self._close_match_strictness = os.getenv("RAG_CLOSE_MATCH_STRICTNESS", "loose")
             self._rerank_timeout_s = 30.0
             self._llm_timeout_s = 60.0
             self._name_field_boost_max: float = float(
@@ -2091,7 +2093,7 @@ class AgenticRAG:
                 CloseMatchKeep,
                 await self._close_match_chain.ainvoke(
                     [
-                        self._sys(prompts.close_match(self._custom_instructions)),
+                        self._sys(prompts.close_match(self._custom_instructions, self._close_match_strictness)),
                         HumanMessage(
                             f"Query: {state.query}\n\n"
                             f"Retrieved documents:\n{snippets}"
