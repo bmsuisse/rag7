@@ -198,9 +198,7 @@ class RAGTuner:
                 name_field_boost_max=trial.suggest_float(
                     "name_field_boost_max", 0.0, 0.5
                 ),
-                boost_decay_sigma=trial.suggest_float(
-                    "boost_decay_sigma", 0.01, 0.15
-                ),
+                boost_decay_sigma=trial.suggest_float("boost_decay_sigma", 0.01, 0.15),
                 expert_threshold=_opt_float(trial, "expert_threshold", 0.05, 0.3),
                 enable_hyde=trial.suggest_categorical("enable_hyde", [True, False]),
                 enable_filter_intent=trial.suggest_categorical(
@@ -338,51 +336,49 @@ class RAGTuner:
 
         def objective(trial: "optuna.Trial") -> float:
             overrides: dict[str, Any] = {
-                    **baseline.model_dump(),
-                    "semantic_ratio": trial.suggest_float("semantic_ratio", 0.2, 0.9),
-                    "retrieval_factor": trial.suggest_int("retrieval_factor", 2, 8),
-                    "rerank_top_n": trial.suggest_int("rerank_top_n", 3, 10),
-                    "fusion": trial.suggest_categorical("fusion", ["rrf", "dbsf"]),
-                    "enable_filter_intent": trial.suggest_categorical(
-                        "enable_filter_intent", [True, False]
-                    ),
-                    "enable_preprocess_llm": trial.suggest_categorical(
-                        "enable_preprocess_llm", [True, False]
-                    ),
-                    "enable_hyde": trial.suggest_categorical(
-                        "enable_hyde", [True, False]
-                    ),
-                    "bm25_fallback_semantic_ratio": trial.suggest_float(
-                        "bm25_fallback_semantic_ratio", 0.7, 1.0
-                    ),
-                    "short_query_threshold": trial.suggest_int(
-                        "short_query_threshold", 3, 8
-                    ),
-                    "short_query_sort_tokens": trial.suggest_categorical(
-                        "short_query_sort_tokens", [True, False]
-                    ),
-                    "fast_accept_score": (
-                        trial.suggest_float("fast_accept_score", 0.5, 0.95)
-                        if trial.suggest_categorical(
-                            "fast_accept_score_enabled", [True, False]
-                        )
-                        else None
-                    ),
-                    "fast_accept_confidence": (
-                        trial.suggest_float("fast_accept_confidence", 0.6, 0.95)
-                        if trial.suggest_categorical(
-                            "fast_accept_confidence_enabled", [True, False]
-                        )
-                        else None
-                    ),
-                    "rerank_min_score": (
-                        trial.suggest_float("rerank_min_score", 0.05, 0.5)
-                        if trial.suggest_categorical(
-                            "rerank_min_score_enabled", [True, False]
-                        )
-                        else None
-                    ),
-                }
+                **baseline.model_dump(),
+                "semantic_ratio": trial.suggest_float("semantic_ratio", 0.2, 0.9),
+                "retrieval_factor": trial.suggest_int("retrieval_factor", 2, 8),
+                "rerank_top_n": trial.suggest_int("rerank_top_n", 3, 10),
+                "fusion": trial.suggest_categorical("fusion", ["rrf", "dbsf"]),
+                "enable_filter_intent": trial.suggest_categorical(
+                    "enable_filter_intent", [True, False]
+                ),
+                "enable_preprocess_llm": trial.suggest_categorical(
+                    "enable_preprocess_llm", [True, False]
+                ),
+                "enable_hyde": trial.suggest_categorical("enable_hyde", [True, False]),
+                "bm25_fallback_semantic_ratio": trial.suggest_float(
+                    "bm25_fallback_semantic_ratio", 0.7, 1.0
+                ),
+                "short_query_threshold": trial.suggest_int(
+                    "short_query_threshold", 3, 8
+                ),
+                "short_query_sort_tokens": trial.suggest_categorical(
+                    "short_query_sort_tokens", [True, False]
+                ),
+                "fast_accept_score": (
+                    trial.suggest_float("fast_accept_score", 0.5, 0.95)
+                    if trial.suggest_categorical(
+                        "fast_accept_score_enabled", [True, False]
+                    )
+                    else None
+                ),
+                "fast_accept_confidence": (
+                    trial.suggest_float("fast_accept_confidence", 0.6, 0.95)
+                    if trial.suggest_categorical(
+                        "fast_accept_confidence_enabled", [True, False]
+                    )
+                    else None
+                ),
+                "rerank_min_score": (
+                    trial.suggest_float("rerank_min_score", 0.05, 0.5)
+                    if trial.suggest_categorical(
+                        "rerank_min_score_enabled", [True, False]
+                    )
+                    else None
+                ),
+            }
             config = RAGConfig(**overrides)
             try:
                 result = asyncio.run(

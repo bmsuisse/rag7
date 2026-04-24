@@ -574,9 +574,7 @@ def run_retriever(rag: AgenticRAG, question: str, top_k: int | None = None) -> N
             for k, v in doc.metadata.items():
                 if v in (None, "", []):
                     continue
-                if not show_internal and (
-                    k.startswith("_") or k in _REDACT_FIELDS
-                ):
+                if not show_internal and (k.startswith("_") or k in _REDACT_FIELDS):
                     continue
                 sv = str(v)
                 if len(sv) > 200:
@@ -594,9 +592,7 @@ def run_retriever(rag: AgenticRAG, question: str, top_k: int | None = None) -> N
             for k, v in doc.metadata.items():
                 if v in (None, "", []):
                     continue
-                if not show_internal and (
-                    k.startswith("_") or k in _REDACT_FIELDS
-                ):
+                if not show_internal and (k.startswith("_") or k in _REDACT_FIELDS):
                     continue
                 print(f"  {k}: {v}")
             if doc.page_content:

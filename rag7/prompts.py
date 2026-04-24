@@ -26,6 +26,7 @@ def _append_custom(prompt: str, custom_instructions: str | None) -> str:
 
 # ---- preprocess / query rewriting ----
 
+
 def hyde_system() -> str:
     return (
         "Write 2-4 sentences from a relevant document. "
@@ -331,6 +332,7 @@ ANSWER_SYSTEM = (
 
 # ---- rewrite-on-failure ----
 
+
 def rewrite_query(
     previous_query: str,
     feedback: str | None = None,
@@ -355,9 +357,7 @@ def rewrite_query(
             f'Top result snippet: "{top_snippet}...".'
         )
     else:
-        parts.append(
-            "The previous search returned NO results."
-        )
+        parts.append("The previous search returned NO results.")
     parts.append(f'Previous query: "{previous_query}".')
     if feedback:
         parts.append(

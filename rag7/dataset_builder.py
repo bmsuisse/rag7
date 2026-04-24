@@ -56,7 +56,6 @@ def _search(rag: Any, query: str, top_k: int) -> tuple[str, list[Document]]:
     return asyncio.run(_run())
 
 
-
 def _handle_not_found(
     rag: Any,
     original_query: str,
@@ -104,7 +103,9 @@ def _handle_not_found(
         doc = docs[idx]
         doc_id = str(doc.metadata.get(id_field, ""))
         if not doc_id or doc_id == "None":
-            _print(f"  [yellow]No '{id_field}'. Keys: {list(doc.metadata.keys())}[/yellow]")
+            _print(
+                f"  [yellow]No '{id_field}'. Keys: {list(doc.metadata.keys())}[/yellow]"
+            )
             doc_id = _prompt("  Enter ID manually").strip()
         if doc_id:
             return doc_id, tried
@@ -168,9 +169,9 @@ def build_testset_interactive(
             continue
 
         _show_results(docs, id_field)
-        choice = _prompt(
-            f"  Pick (1-{len(docs)}) / [n]ot found / [s]kip"
-        ).strip().lower()
+        choice = (
+            _prompt(f"  Pick (1-{len(docs)}) / [n]ot found / [s]kip").strip().lower()
+        )
 
         if choice == "s" or not choice:
             continue
@@ -189,9 +190,7 @@ def build_testset_interactive(
                         note=note,
                     )
                 )
-                _print(
-                    f"  [green]Saved: {len(all_queries)} queries → {doc_id}[/green]"
-                )
+                _print(f"  [green]Saved: {len(all_queries)} queries → {doc_id}[/green]")
             continue
 
         try:
@@ -241,10 +240,7 @@ def build_testset_interactive(
         f"\n  [bold green]Saved {len(all_dicts)} hit cases "
         f"({len(cases)} unique docs) → {output}[/bold green]"
     )
-    _print(
-        f"  Tune: [bold]python -m rag7.tuner --hits {output} "
-        f"--index <name>[/bold]"
-    )
+    _print(f"  Tune: [bold]python -m rag7.tuner --hits {output} --index <name>[/bold]")
 
 
 def _cli_main() -> None:
@@ -277,7 +273,9 @@ def _cli_main() -> None:
 
     index = args.index
     if not index:
-        index = os.getenv("MS_INDEX") or _prompt("  Index / collection", default="documents")
+        index = os.getenv("MS_INDEX") or _prompt(
+            "  Index / collection", default="documents"
+        )
 
     embed_fn = _make_azure_embed_fn()
     if embed_fn is None:

@@ -183,8 +183,11 @@ class _StubStructuredChain:
 def _build_stub_llm(collection_intent: CollectionIntent):
     """Stub LLM whose `with_structured_output` returns canned Pydantic models."""
     from rag7.models import (
+        AnswerGrade,
+        CloseMatchKeep,
         FilterIntent,
         MultiQuery,
+        ProductCodeQuery,
         QualityAssessment,
         ReasoningVerdict,
         RelevanceCheck,
@@ -201,6 +204,9 @@ def _build_stub_llm(collection_intent: CollectionIntent):
         CollectionIntent: collection_intent,
         RelevanceCheck: RelevanceCheck(makes_sense=False, confidence=0.0),
         ReasoningVerdict: ReasoningVerdict(),
+        AnswerGrade: AnswerGrade(sufficient=True, confidence=1.0, reason="", suggestion=""),
+        CloseMatchKeep: CloseMatchKeep(keep=[1, 2, 3, 4, 5]),
+        ProductCodeQuery: ProductCodeQuery(is_product_code=False, code=None),
     }
 
     llm = MagicMock()

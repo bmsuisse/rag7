@@ -287,13 +287,20 @@ def _heuristic_field_rank(key: str) -> int:
     k = key.lower()
     if any(x in k for x in ("name", "title", "label", "bezeichnung")):
         return 0
-    if any(x in k for x in ("search_term", "keyword", "tag", "description", "beschreibung")):
+    if any(
+        x in k for x in ("search_term", "keyword", "tag", "description", "beschreibung")
+    ):
         return 1
-    if any(x in k for x in ("brand", "supplier", "manufacturer", "hersteller", "lieferant")):
+    if any(
+        x in k for x in ("brand", "supplier", "manufacturer", "hersteller", "lieferant")
+    ):
         return 2
     if any(x in k for x in ("category", "group", "type", "gruppe", "kategorie")):
         return 3
-    if any(x in k for x in ("akeneo", "attribute", "feature", "spec", "merkmal", "eigenschaft")):
+    if any(
+        x in k
+        for x in ("akeneo", "attribute", "feature", "spec", "merkmal", "eigenschaft")
+    ):
         return 4
     return 10
 
@@ -755,7 +762,9 @@ class AgenticRAG:
             self._enable_swarm_grade = config.enable_swarm_grade
             self._enable_close_match_grader = bool(config.enable_close_match_grader)
             self._close_match_strictness: str = config.close_match_strictness
-            self._close_match_min_top_rerank: float | None = config.close_match_min_top_rerank
+            self._close_match_min_top_rerank: float | None = (
+                config.close_match_min_top_rerank
+            )
             self._rerank_timeout_s = config.rerank_timeout_s
             self._llm_timeout_s = config.llm_timeout_s
             self.max_iter = config.max_iter
@@ -806,9 +815,13 @@ class AgenticRAG:
             self._enable_close_match_grader = bool(
                 int(os.getenv("RAG_ENABLE_CLOSE_MATCH_GRADER", "1"))
             )
-            self._close_match_strictness = os.getenv("RAG_CLOSE_MATCH_STRICTNESS", "loose")
+            self._close_match_strictness = os.getenv(
+                "RAG_CLOSE_MATCH_STRICTNESS", "loose"
+            )
             _cmr = os.getenv("RAG_CLOSE_MATCH_MIN_TOP_RERANK")
-            self._close_match_min_top_rerank: float | None = float(_cmr) if _cmr else None
+            self._close_match_min_top_rerank: float | None = (
+                float(_cmr) if _cmr else None
+            )
             self._rerank_timeout_s = 30.0
             self._llm_timeout_s = 60.0
             self._name_field_boost_max: float = float(
@@ -931,7 +944,9 @@ class AgenticRAG:
 
             # One extra broader sample to improve coverage of distinct values.
             try:
-                extra = self.backend.sample_documents(limit=200, filter_expr=self.filter)
+                extra = self.backend.sample_documents(
+                    limit=200, filter_expr=self.filter
+                )
             except Exception:
                 extra = []
             combined = list(sample) + list(extra)
@@ -960,7 +975,9 @@ class AgenticRAG:
             _filters_cache_save(schema_sig, discovered)
         except Exception as e:
             self._filter_values = {}
-            print(f"  [{self.index}] filter-value discovery failed ({e}), using empty dict")
+            print(
+                f"  [{self.index}] filter-value discovery failed ({e}), using empty dict"
+            )
 
     def _infer_name_and_group_fields(self, sample: list[dict]) -> None:
         if self.name_field and self.group_field:
@@ -1258,8 +1275,10 @@ class AgenticRAG:
         if hyde_text is None:
             n_words = len(hyde_source.split())
             short_thr = self._short_query_threshold
-            if self.embed_fn and n_words >= 1 and (
-                n_words <= short_thr or n_words >= self.hyde_min_words
+            if (
+                self.embed_fn
+                and n_words >= 1
+                and (n_words <= short_thr or n_words >= self.hyde_min_words)
             ):
                 try:
                     hyde_text = await self._ahypothetical_doc(hyde_source)
@@ -1758,7 +1777,9 @@ class AgenticRAG:
         rescored = [(idx_map[r.index], r.relevance_score) for r in results]
         return rescored + tail
 
-    async def _arerank(self, state: RAGState, *, _accumulate_pool: bool = True) -> RAGState:
+    async def _arerank(
+        self, state: RAGState, *, _accumulate_pool: bool = True
+    ) -> RAGState:
         t0 = time.perf_counter()
         if not state.documents:
             return state
@@ -1883,7 +1904,12 @@ class AgenticRAG:
             }
         )
         self._trace(
-            new, "pool_rerank", t0, path="fired", pool=len(pool), kept=len(new.documents)
+            new,
+            "pool_rerank",
+            t0,
+            path="fired",
+            pool=len(pool),
+            kept=len(new.documents),
         )
         return new
 
@@ -2096,10 +2122,13 @@ class AgenticRAG:
                 CloseMatchKeep,
                 await self._close_match_chain.ainvoke(
                     [
-                        self._sys(prompts.close_match(self._custom_instructions, self._close_match_strictness)),
+                        self._sys(
+                            prompts.close_match(
+                                self._custom_instructions, self._close_match_strictness
+                            )
+                        ),
                         HumanMessage(
-                            f"Query: {state.query}\n\n"
-                            f"Retrieved documents:\n{snippets}"
+                            f"Query: {state.query}\n\nRetrieved documents:\n{snippets}"
                         ),
                     ]
                 ),

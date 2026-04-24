@@ -301,9 +301,7 @@ class LLMReranker:
                     with attempt:
                         resp = cast(
                             RelevanceScore,
-                            await self._score_chain.ainvoke(
-                                [HumanMessage(prompt)]
-                            ),
+                            await self._score_chain.ainvoke([HumanMessage(prompt)]),
                         )
                         return idx, float(resp.score)
             except Exception:
