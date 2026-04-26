@@ -31,11 +31,13 @@ from .backend import (
     SearchRequest,
     _MultiBackend,
 )
+from .config import RAGConfig
 from .models import (
     AnswerGrade,
     CloseMatchKeep,
     CollectionIntent,
     ConversationTurn,
+    FieldPriority,
     FilterIntent,
     MultiQuery,
     ProductCodeQuery,
@@ -46,7 +48,6 @@ from .models import (
     Reranker,
     SearchQuery,
 )
-from .config import RAGConfig
 from .rerankers import CohereReranker, LLMReranker
 from .tools import RAGToolset
 from .utils import (
@@ -113,6 +114,40 @@ def _filters_cache_save(schema_sig: str, values: dict[str, list[str]]) -> None:
         from pathlib import Path
 
         Path(_filters_cache_path(schema_sig)).write_text(_json.dumps(values, indent=2))
+    except Exception:
+        pass
+
+
+def _field_rank_cache_path(schema_sig: str) -> "os.PathLike[str]":
+    from pathlib import Path
+
+    base = Path.home() / ".cache" / "rag7"
+    base.mkdir(parents=True, exist_ok=True)
+    return base / f"field-rank-v1_{schema_sig}.json"
+
+
+def _field_rank_cache_load(schema_sig: str) -> dict[str, int] | None:
+    try:
+        import json as _json
+        from pathlib import Path
+
+        p = Path(_field_rank_cache_path(schema_sig))
+        if not p.is_file():
+            return None
+        raw = _json.loads(p.read_text())
+        return {str(k): int(v) for k, v in raw.items()}
+    except Exception:
+        return None
+
+
+def _field_rank_cache_save(schema_sig: str, ranks: dict[str, int]) -> None:
+    try:
+        import json as _json
+        from pathlib import Path
+
+        Path(_field_rank_cache_path(schema_sig)).write_text(
+            _json.dumps(ranks, indent=2)
+        )
     except Exception:
         pass
 
@@ -239,35 +274,6 @@ _FILTER_INTENT_WORDS_BY_LANG: dict[str, frozenset[str]] = {
     "en": frozenset({"from", "without", "not", "no", "for", "by", "of", "with"}),
 }
 
-_FILTER_INTENT_WORDS = frozenset(
-    w for ws in _FILTER_INTENT_WORDS_BY_LANG.values() for w in ws
-)
-
-_NEGATION_TOKENS: frozenset[str] = frozenset(
-    {
-        "nicht",
-        "ohne",
-        "kein",
-        "keine",
-        "keinen",
-        "keinem",
-        "not",
-        "no",
-        "without",
-        "except",
-        "exclude",
-        "excluding",
-        "sans",
-        "pas",
-        "aucun",
-        "aucune",
-        "senza",
-        "non",
-        "nessun",
-        "nessuna",
-    }
-)
-
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
 
 # Queries that are purely numeric with 6+ digits are product codes (EAN-8/13, GTIN-14,
@@ -283,26 +289,7 @@ def _doc_to_grader_text(doc: "Document") -> str:
     return doc.page_content
 
 
-def _heuristic_field_rank(key: str) -> int:
-    k = key.lower()
-    if any(x in k for x in ("name", "title", "label", "bezeichnung")):
-        return 0
-    if any(
-        x in k for x in ("search_term", "keyword", "tag", "description", "beschreibung")
-    ):
-        return 1
-    if any(
-        x in k for x in ("brand", "supplier", "manufacturer", "hersteller", "lieferant")
-    ):
-        return 2
-    if any(x in k for x in ("category", "group", "type", "gruppe", "kategorie")):
-        return 3
-    if any(
-        x in k
-        for x in ("akeneo", "attribute", "feature", "spec", "merkmal", "eigenschaft")
-    ):
-        return 4
-    return 10
+_UNKNOWN_FIELD_RANK = 10
 
 
 def _filter_bohrer_variants(
@@ -573,7 +560,9 @@ class AgenticRAG:
         configurable_fields: str | list[str] | None = None,
         **kwargs: Any,
     ) -> "AgenticRAG":
-        from langchain.chat_models import init_chat_model  # type: ignore[import-untyped]
+        from langchain.chat_models import (
+            init_chat_model,  # type: ignore[import-untyped]
+        )
 
         init_kwargs: dict[str, Any] = {"temperature": 0}
         if configurable_fields is not None:
@@ -855,6 +844,9 @@ class AgenticRAG:
         self._select_collection_chain = _ck(
             self._llm, "select-collection"
         ).with_structured_output(CollectionIntent, method="json_schema")
+        self._field_priority_chain = _ck(
+            self._llm, "field-priority"
+        ).with_structured_output(FieldPriority, method="json_schema")
         self._relevance_chain = _ck(self._llm, "relevance").with_structured_output(
             RelevanceCheck, method="json_schema"
         )
@@ -1025,17 +1017,25 @@ class AgenticRAG:
             if candidates:
                 self.group_field = candidates[0]
 
-        # Build field priority from discovered collection fields so _hit_to_text
-        # doesn't need a schema-specific heuristic at render time.
         known_fields = sorted({k for d in sample[:5] for k in d.keys()})
         offset = len(attrs)
         self._field_priority: dict[str, int] = {
             field.split(":", 1)[0]: i for i, field in enumerate(attrs)
         }
-        for field in known_fields:
-            base = field.split(":", 1)[0]
-            if base not in self._field_priority:
-                self._field_priority[base] = offset + _heuristic_field_rank(base)
+        gap_fields = [
+            field.split(":", 1)[0]
+            for field in known_fields
+            if field.split(":", 1)[0] not in self._field_priority
+        ]
+        schema_sig = self._schema_signature(sample)
+        cached_ranks = _field_rank_cache_load(schema_sig)
+        for base in gap_fields:
+            if cached_ranks and base in cached_ranks:
+                self._field_priority[base] = offset + cached_ranks[base]
+            else:
+                self._field_priority[base] = offset + _UNKNOWN_FIELD_RANK
+        self._field_priority_sample: list[dict] = list(sample[:5])
+        self._field_priority_unranked: list[str] = [] if cached_ranks else gap_fields
 
     def _schema_signature(self, sample: list[dict]) -> str:
         import hashlib
@@ -1073,7 +1073,7 @@ class AgenticRAG:
             if rank is None:
                 if isinstance(v, str) and content and rendered in content:
                     continue
-                rank = 1000 + _heuristic_field_rank(k)
+                rank = 1000 + _UNKNOWN_FIELD_RANK
             line = (
                 f"**{k}**:\n{rendered}"
                 if "\n" in rendered and not isinstance(v, str)
@@ -1475,7 +1475,7 @@ class AgenticRAG:
             filter_intent.field and filter_intent.value and filter_intent.operator
         )
         if has_filter:
-            f_expr = f'{filter_intent.field} {filter_intent.operator} "{filter_intent.value}"'
+            f_expr = self._build_filter_expr(filter_intent)
             broad_docs, filtered_docs = await asyncio.gather(
                 loop.run_in_executor(None, _search),
                 loop.run_in_executor(None, _search, f_expr),
@@ -1604,6 +1604,9 @@ class AgenticRAG:
                 return []
 
         hits = await _search(filter_expr)
+        if not hits and intent.and_filters:
+            primary_only = intent.model_copy(update={"and_filters": []})
+            hits = await _search(self._build_filter_expr(primary_only))
         if (
             self._has_own_brand_field
             and _is_brand_intent(intent)
@@ -1777,6 +1780,39 @@ class AgenticRAG:
         rescored = [(idx_map[r.index], r.relevance_score) for r in results]
         return rescored + tail
 
+    def _apply_intent_post_filter(
+        self, docs: "list[Document]", intent: "FilterIntent | None"
+    ) -> "list[Document]":
+        if not intent or not docs:
+            return docs
+        primary_negates = (
+            not intent.field
+            and intent.operator in ("NOT_CONTAINS", "!=")
+            and intent.value
+        )
+        if primary_negates:
+            exclude_vals = [str(intent.value)] + list(intent.extra_excludes)
+            docs = [
+                d
+                for d in docs
+                if not any(
+                    self._content_contains_exclusion(d.page_content, v)
+                    for v in exclude_vals
+                )
+            ]
+        for af in intent.and_filters:
+            if af.operator in ("NOT_CONTAINS", "!=") and af.value:
+                af_vals = [str(af.value)] + list(af.extra_excludes)
+                docs = [
+                    d
+                    for d in docs
+                    if not any(
+                        self._content_contains_exclusion(d.page_content, v)
+                        for v in af_vals
+                    )
+                ]
+        return docs
+
     async def _arerank(
         self, state: RAGState, *, _accumulate_pool: bool = True
     ) -> RAGState:
@@ -1784,6 +1820,11 @@ class AgenticRAG:
         if not state.documents:
             return state
         if state.pre_reranked:
+            filtered = self._apply_intent_post_filter(
+                list(state.documents), state.filter_intent
+            )
+            if len(filtered) != len(state.documents):
+                state = state.model_copy(update={"documents": filtered})
             self._trace(state, "rerank", t0, skipped="pre_reranked")
             return state
 
@@ -1835,6 +1876,7 @@ class AgenticRAG:
                     d.metadata["_rerank_score"] = float(score_by_idx[i])
             ranked = self._apply_boost(state.documents, indexed, state.query)
             intent = state.filter_intent
+            ranked = self._apply_intent_post_filter(ranked, intent)
             if intent and intent.field and ranked:
                 is_negation = intent.operator in ("NOT_CONTAINS", "!=")
                 if is_negation:
@@ -2042,6 +2084,16 @@ class AgenticRAG:
                     for v in exclude_vals
                 ):
                     return True
+        if intent:
+            for af in intent.and_filters:
+                if af.operator in ("NOT_CONTAINS", "!="):
+                    af_vals = [str(af.value)] + list(af.extra_excludes)
+                    for d in state.documents[: self.rerank_top_n]:
+                        if any(
+                            self._content_contains_exclusion(d.page_content, v)
+                            for v in af_vals
+                        ):
+                            return True
         if state.iterations > 1:
             return True
         return False
@@ -2370,11 +2422,7 @@ class AgenticRAG:
         has_filter = (
             filter_intent.field and filter_intent.value and filter_intent.operator
         )
-        f_expr = (
-            f'{filter_intent.field} {filter_intent.operator} "{filter_intent.value}"'
-            if has_filter
-            else None
-        )
+        f_expr = self._build_filter_expr(filter_intent) if has_filter else None
 
         return queries, vectors, f_expr
 
@@ -2578,8 +2626,8 @@ class AgenticRAG:
             user_id = ((config or {}).get("configurable") or {}).get(
                 "user_id", "default"
             )
-            import uuid
             import time as _time
+            import uuid
 
             key = str(uuid.uuid4())
             await store.aput(
@@ -2881,7 +2929,7 @@ class AgenticRAG:
         elif not (has_strong_signal or has_weak_capital_signal or has_filter_word):
             return FilterIntent(field=None, value="", operator="")
 
-        cached = _cache.load("filter-intent-v7", tuple(filterable), question)
+        cached = _cache.load("filter-intent-v12", tuple(filterable), question)
         if cached:
             try:
                 return FilterIntent.model_validate(cached)
@@ -2920,9 +2968,8 @@ class AgenticRAG:
                     ]
                 ),
             )
-            result = self._patch_exclusion_intent(question, result, filterable)
             _cache.save(
-                "filter-intent-v7",
+                "filter-intent-v12",
                 tuple(filterable),
                 question,
                 value=result.model_dump(),
@@ -2930,54 +2977,6 @@ class AgenticRAG:
             return result
         except Exception:
             return FilterIntent(field=None, value="", operator="")
-
-    @staticmethod
-    def _patch_exclusion_intent(
-        question: str, intent: FilterIntent, filterable: list[str]
-    ) -> FilterIntent:
-        import re
-
-        alt_m = re.search(
-            r"(?i)\balternative\s+(?:zu|à|to)\s+(.+?)$",
-            question.strip(),
-        )
-        if alt_m and "article_name" in filterable:
-            product = alt_m.group(1).strip()
-            if intent.operator == "NOT_CONTAINS" and intent.field == "article_name":
-                return intent
-            return FilterIntent(
-                field="article_name", value=product, operator="NOT_CONTAINS"
-            )
-
-        neg_m = re.search(
-            r"(?i)\b(?:nicht|not|sans|pas de|except|exclude)\s+(?:von\s+)?(.+?)$",
-            question.strip(),
-        )
-        if neg_m and intent.operator not in ("NOT_CONTAINS", "!="):
-            raw_entity = neg_m.group(1).strip()
-
-            parts = re.split(r"\s+(?:oder|or|ou)\s+", raw_entity, flags=re.IGNORECASE)
-
-            cleaned = []
-            for p in parts:
-                p = re.sub(
-                    r"\s+(?:und|and|et)\s+.*", "", p, flags=re.IGNORECASE
-                ).strip()
-                if p:
-                    cleaned.append(p)
-            entity = cleaned[0] if cleaned else raw_entity
-            extras = cleaned[1:] if len(cleaned) > 1 else []
-            if intent.field and intent.field != "supplier_name":
-                return intent
-            if "supplier_name" in filterable:
-                return FilterIntent(
-                    field="supplier_name",
-                    value=entity,
-                    operator="NOT_CONTAINS",
-                    extra_excludes=extras,
-                )
-
-        return intent
 
     async def _aselect_collections(self, question: str) -> list[str]:
         if not self.collections:
@@ -3158,9 +3157,61 @@ class AgenticRAG:
         state = await self._arerank(state)
         return state.query, state.documents[:top_k]
 
+    async def _aensure_field_priority(self) -> None:
+        unranked = getattr(self, "_field_priority_unranked", None)
+        if not unranked:
+            return
+        sample = getattr(self, "_field_priority_sample", [])
+        try:
+            schema_sig = self._schema_signature(sample) if sample else None
+        except Exception:
+            schema_sig = None
+        fields_for_llm = list(unranked)
+        self._field_priority_unranked = []
+        try:
+            blocks = []
+            for f in fields_for_llm:
+                vals = []
+                for d in sample:
+                    v = d.get(f)
+                    if v is None or v == "":
+                        continue
+                    s = str(v)
+                    vals.append(s[:120])
+                    if len(vals) >= 3:
+                        break
+                blocks.append(f"  {f}: {vals}")
+            fields_block = "\n".join(blocks)
+            result = cast(
+                FieldPriority,
+                await self._field_priority_chain.ainvoke(
+                    [
+                        self._sys(
+                            prompts.field_priority(
+                                fields_block, self._custom_instructions
+                            )
+                        ),
+                        HumanMessage(f"Rank these {len(fields_for_llm)} fields."),
+                    ]
+                ),
+            )
+            ranks = {
+                fr.name: int(fr.rank)
+                for fr in result.ranks
+                if fr.name in fields_for_llm
+            }
+            offset = len(self._index_config.searchable_attributes)
+            for f, r in ranks.items():
+                self._field_priority[f] = offset + max(0, min(9, r))
+            if schema_sig:
+                _field_rank_cache_save(schema_sig, ranks)
+        except Exception:
+            pass
+
     async def _aretrieve_documents(
         self, query: str, top_k: int | None = None
     ) -> tuple[str, list[Document]]:
+        await self._aensure_field_priority()
         k = top_k or self.top_k
         limit = int(k * self.retrieval_factor)
 

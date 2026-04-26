@@ -185,6 +185,7 @@ def _build_stub_llm(collection_intent: CollectionIntent):
     from rag7.models import (
         AnswerGrade,
         CloseMatchKeep,
+        FieldPriority,
         FilterIntent,
         MultiQuery,
         ProductCodeQuery,
@@ -202,6 +203,7 @@ def _build_stub_llm(collection_intent: CollectionIntent):
         MultiQuery: MultiQuery(queries=[]),
         FilterIntent: FilterIntent(field=None, value="", operator=""),
         CollectionIntent: collection_intent,
+        FieldPriority: FieldPriority(ranks=[]),
         RelevanceCheck: RelevanceCheck(makes_sense=False, confidence=0.0),
         ReasoningVerdict: ReasoningVerdict(),
         AnswerGrade: AnswerGrade(sufficient=True, confidence=1.0, reason="", suggestion=""),
