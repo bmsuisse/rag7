@@ -206,7 +206,9 @@ def _build_stub_llm(collection_intent: CollectionIntent):
         FieldPriority: FieldPriority(ranks=[]),
         RelevanceCheck: RelevanceCheck(makes_sense=False, confidence=0.0),
         ReasoningVerdict: ReasoningVerdict(),
-        AnswerGrade: AnswerGrade(sufficient=True, confidence=1.0, reason="", suggestion=""),
+        AnswerGrade: AnswerGrade(
+            sufficient=True, confidence=1.0, reason="", suggestion=""
+        ),
         CloseMatchKeep: CloseMatchKeep(keep=[1, 2, 3, 4, 5]),
         ProductCodeQuery: ProductCodeQuery(is_product_code=False, code=None),
     }

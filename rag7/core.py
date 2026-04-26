@@ -94,7 +94,6 @@ _llm_retry = retry(
 )
 
 
-
 _BRAND_FIELDS = frozenset({"supplier_name", "brand", "manufacturer_name", "vendor"})
 
 
@@ -145,8 +144,6 @@ def _filter_bohrer_variants(
         for v in variants
         if "bohrer" not in v.lower() and "bohrschrauber" not in v.lower()
     ]
-
-
 
 
 class AgenticRAG(FilterDetectionMixin, IntentFilterMixin, MemoryMixin):
