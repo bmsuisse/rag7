@@ -24,6 +24,12 @@ from langgraph.graph import END, START, StateGraph
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from . import _cache, prompts
+from .disk_cache import (
+    field_rank_cache_load,
+    field_rank_cache_save,
+    filters_cache_load,
+    filters_cache_save,
+)
 from .backend import (
     _ACTIVE_COLLECTIONS,
     InMemoryBackend,
@@ -86,70 +92,6 @@ _CATEGORY_FIELD_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-
-def _filters_cache_path(schema_sig: str) -> "os.PathLike[str]":
-    from pathlib import Path
-
-    base = Path.home() / ".cache" / "rag7"
-    base.mkdir(parents=True, exist_ok=True)
-    return base / f"filters-v1_{schema_sig}.json"
-
-
-def _filters_cache_load(schema_sig: str) -> dict[str, list[str]] | None:
-    try:
-        import json as _json
-        from pathlib import Path
-
-        p = Path(_filters_cache_path(schema_sig))
-        if not p.is_file():
-            return None
-        return _json.loads(p.read_text())
-    except Exception:
-        return None
-
-
-def _filters_cache_save(schema_sig: str, values: dict[str, list[str]]) -> None:
-    try:
-        import json as _json
-        from pathlib import Path
-
-        Path(_filters_cache_path(schema_sig)).write_text(_json.dumps(values, indent=2))
-    except Exception:
-        pass
-
-
-def _field_rank_cache_path(schema_sig: str) -> "os.PathLike[str]":
-    from pathlib import Path
-
-    base = Path.home() / ".cache" / "rag7"
-    base.mkdir(parents=True, exist_ok=True)
-    return base / f"field-rank-v1_{schema_sig}.json"
-
-
-def _field_rank_cache_load(schema_sig: str) -> dict[str, int] | None:
-    try:
-        import json as _json
-        from pathlib import Path
-
-        p = Path(_field_rank_cache_path(schema_sig))
-        if not p.is_file():
-            return None
-        raw = _json.loads(p.read_text())
-        return {str(k): int(v) for k, v in raw.items()}
-    except Exception:
-        return None
-
-
-def _field_rank_cache_save(schema_sig: str, ranks: dict[str, int]) -> None:
-    try:
-        import json as _json
-        from pathlib import Path
-
-        Path(_field_rank_cache_path(schema_sig)).write_text(
-            _json.dumps(ranks, indent=2)
-        )
-    except Exception:
-        pass
 
 
 def _has_is_own_brand_field(backend: SearchBackend) -> bool:
@@ -919,7 +861,7 @@ class AgenticRAG:
             self._infer_name_and_group_fields(sample)
 
             schema_sig = self._schema_signature(sample)
-            cached = _filters_cache_load(schema_sig)
+            cached = filters_cache_load(schema_sig)
             if cached is not None:
                 self._filter_values = {k: list(v) for k, v in cached.items()}
                 return
@@ -931,7 +873,7 @@ class AgenticRAG:
 
             if not filterable:
                 self._filter_values = {}
-                _filters_cache_save(schema_sig, {})
+                filters_cache_save(schema_sig, {})
                 return
 
             # One extra broader sample to improve coverage of distinct values.
@@ -964,7 +906,7 @@ class AgenticRAG:
                     discovered[attr] = sorted(values)[:20]
 
             self._filter_values = discovered
-            _filters_cache_save(schema_sig, discovered)
+            filters_cache_save(schema_sig, discovered)
         except Exception as e:
             self._filter_values = {}
             print(
@@ -1028,7 +970,7 @@ class AgenticRAG:
             if field.split(":", 1)[0] not in self._field_priority
         ]
         schema_sig = self._schema_signature(sample)
-        cached_ranks = _field_rank_cache_load(schema_sig)
+        cached_ranks = field_rank_cache_load(schema_sig)
         for base in gap_fields:
             if cached_ranks and base in cached_ranks:
                 self._field_priority[base] = offset + cached_ranks[base]
@@ -3204,7 +3146,7 @@ class AgenticRAG:
             for f, r in ranks.items():
                 self._field_priority[f] = offset + max(0, min(9, r))
             if schema_sig:
-                _field_rank_cache_save(schema_sig, ranks)
+                field_rank_cache_save(schema_sig, ranks)
         except Exception:
             pass
 
