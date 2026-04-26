@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from langchain_core.runnables.config import RunnableConfig
 
-    from .models import RAGState
+    from ..models import RAGState
 
 
 class MemoryMixin:

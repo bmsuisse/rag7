@@ -6,7 +6,7 @@ import warnings
 from typing import TYPE_CHECKING, Any, Callable, cast
 
 if TYPE_CHECKING:
-    from .backend import SearchBackend
+    from ..backend import SearchBackend
 
 
 _ID_SUFFIXES = ("_id", "_code", "_key", "_num")
@@ -96,7 +96,7 @@ def _align_embed_fn_with_backend(
         rebuilt = cast(Callable[[str], list[float]] | None, rebuild(target))
         if rebuilt is not None:
             return rebuilt
-    from .utils import _adapt_embed_fn_to_dim
+    from ..utils import _adapt_embed_fn_to_dim
 
     warnings.warn(
         f"Embed fn returns {probe_dim}-d but index expects {target}-d; "

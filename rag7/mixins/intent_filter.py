@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from langchain_core.documents import Document
 
-    from .models import FilterIntent, RAGState
+    from ..models import FilterIntent, RAGState
 
 
 class IntentFilterMixin:
