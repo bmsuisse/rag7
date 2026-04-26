@@ -343,6 +343,7 @@ class AgenticRAG(FilterDetectionMixin, IntentFilterMixin, MemoryMixin):
         self.retrieval_factor = retrieval_factor or int(
             os.getenv("RAG_RETRIEVAL_FACTOR", "4")
         )
+        self.min_rerank_pool = int(os.getenv("RAG_MIN_RERANK_POOL", "24"))
         self.max_iter = max_iter or int(os.getenv("RAG_MAX_ITER", "3"))
         self.verbose = (
             verbose if verbose is not None else bool(int(os.getenv("RAG_VERBOSE", "0")))
@@ -872,7 +873,7 @@ class AgenticRAG(FilterDetectionMixin, IntentFilterMixin, MemoryMixin):
         vectors: list[list[float] | None] | None = None,
         filter_expr: str | None = None,
     ) -> list[Document]:
-        limit = int(self.top_k * self.retrieval_factor)
+        limit = self._rerank_pool_size(self.top_k)
         vecs: list[list[float] | None] = vectors if vectors else [None] * len(queries)
 
         parts = [p for p in [f"language = {lang}" if lang else None, filter_expr] if p]
@@ -986,7 +987,9 @@ class AgenticRAG(FilterDetectionMixin, IntentFilterMixin, MemoryMixin):
         adaptive_fusion: str | None = None,
         hyde_text: str | None = None,
     ) -> tuple[list[Document], bool]:
-        limit = int(self.top_k * (factor or self.retrieval_factor))
+        limit = max(
+            int(self.top_k * (factor or self.retrieval_factor)), self.min_rerank_pool
+        )
         hyde_source = question or query
 
         if hyde_text is None:
@@ -1073,6 +1076,13 @@ class AgenticRAG(FilterDetectionMixin, IntentFilterMixin, MemoryMixin):
         if state.selected_collections:
             _ACTIVE_COLLECTIONS.set(state.selected_collections)
         return state
+
+    def _rerank_pool_size(self, k: int) -> int:
+        """Number of candidates to fetch before reranking. Floors at
+        ``min_rerank_pool`` so that small ``top_k`` (e.g. user asks for
+        3) still gives the reranker a meaningful pool to choose from.
+        """
+        return max(int(k * self.retrieval_factor), self.min_rerank_pool)
 
     def _trace(self, state: RAGState, node: str, t0: float, **info: Any) -> None:
         dur = round(time.perf_counter() - t0, 4)
@@ -1279,7 +1289,7 @@ class AgenticRAG(FilterDetectionMixin, IntentFilterMixin, MemoryMixin):
         variants: list[str] | None = None,
     ) -> list[Document]:
         filter_expr = self._build_filter_expr(intent)
-        limit = int(self.top_k * self.retrieval_factor)
+        limit = self._rerank_pool_size(self.top_k)
         loop = asyncio.get_running_loop()
         vector: list[float] | None = None
         if self.embed_fn:
@@ -2454,7 +2464,7 @@ class AgenticRAG(FilterDetectionMixin, IntentFilterMixin, MemoryMixin):
     async def _aalternative_retrieve(
         self, query: str, alternative_to: str, top_k: int
     ) -> tuple[str, list[Document]]:
-        limit = int(top_k * self.retrieval_factor)
+        limit = self._rerank_pool_size(top_k)
         ref_docs = await self._afast_keyword_retrieve(alternative_to, 3)
         if not ref_docs:
             ref_docs = await self._afast_keyword_retrieve(query, limit)
@@ -2503,7 +2513,7 @@ class AgenticRAG(FilterDetectionMixin, IntentFilterMixin, MemoryMixin):
     ) -> tuple[str, list[Document]]:
         await self._aensure_field_priority()
         k = top_k or self.top_k
-        limit = int(k * self.retrieval_factor)
+        limit = self._rerank_pool_size(k)
 
         # Product-code fast-track: EAN, GTIN, article IDs, barcodes.
         # Tier 1 — pure digits (no LLM needed).
