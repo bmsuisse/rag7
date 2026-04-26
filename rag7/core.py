@@ -2758,7 +2758,9 @@ class AgenticRAG(FilterDetectionMixin, IntentFilterMixin, MemoryMixin):
                     yield ("node", node_name)
                     if isinstance(node_payload, dict):
                         try:
-                            last_state = RAGState(**{**state.model_dump(), **node_payload})
+                            last_state = RAGState(
+                                **{**state.model_dump(), **node_payload}
+                            )
                         except Exception:
                             pass
                     elif isinstance(node_payload, RAGState):
