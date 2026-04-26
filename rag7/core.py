@@ -325,6 +325,7 @@ class AgenticRAG(FilterDetectionMixin, IntentFilterMixin, MemoryMixin):
         memory_store: Any = None,
         mem0_memory: Any = None,
         config: "RAGConfig | None" = None,
+        trace_callback: Callable[[dict[str, Any]], None] | None = None,
     ):
         self.index = index
         if collections:
@@ -346,6 +347,7 @@ class AgenticRAG(FilterDetectionMixin, IntentFilterMixin, MemoryMixin):
         self.verbose = (
             verbose if verbose is not None else bool(int(os.getenv("RAG_VERBOSE", "0")))
         )
+        self.trace_callback: Callable[[dict[str, Any]], None] | None = trace_callback
         self.n_swarm_queries = n_swarm_queries or int(
             os.getenv("RAG_N_SWARM_QUERIES", "4")
         )
@@ -1074,11 +1076,17 @@ class AgenticRAG(FilterDetectionMixin, IntentFilterMixin, MemoryMixin):
 
     def _trace(self, state: RAGState, node: str, t0: float, **info: Any) -> None:
         dur = round(time.perf_counter() - t0, 4)
-        state.trace.append({"node": node, "dur_s": dur, **info})
+        event = {"node": node, "dur_s": dur, **info}
+        state.trace.append(event)
         if self.verbose:
             extras = " ".join(f"{k}={v}" for k, v in info.items())
             msg = f"[rag {node}] {dur:.3f}s {extras}".rstrip()
             print(msg, file=sys.stderr, flush=True)
+        if self.trace_callback is not None:
+            try:
+                self.trace_callback(event)
+            except Exception:
+                pass
 
     async def _acontextualize(self, state: RAGState) -> RAGState:
         if not state.history or len(state.question.split()) > 10:

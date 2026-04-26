@@ -530,12 +530,54 @@ def render_answer(answer: str, docs: list[Document]) -> None:
     render_sources(docs)
 
 
+_NODE_LABEL = {
+    "parallel_start": "Detecting intent",
+    "preprocess": "Preprocessing query",
+    "retrieve": "Searching",
+    "swarm_retrieve": "Broad fallback search",
+    "rerank": "Reranking",
+    "pool_rerank": "Final rerank",
+    "quality_gate": "Quality check",
+    "reason": "Reasoning over docs",
+    "close_match": "Match check",
+    "generate": "Generating answer",
+    "rewrite": "Rewriting query",
+    "final_grade": "Grading answer",
+    "read_memory": "Reading memory",
+    "write_memory": "Writing memory",
+    "filter_search": "Filter search",
+    "fast_keyword": "Keyword fast-path",
+}
+
+
+def _format_node_event(event: dict) -> str:
+    label = _NODE_LABEL.get(event.get("node", ""), event.get("node", "..."))
+    extras: list[str] = []
+    if (docs := event.get("docs")) is not None:
+        extras.append(f"{docs} docs")
+    if (path := event.get("path")) and path != "skip":
+        extras.append(str(path))
+    if (it := event.get("iter")) is not None:
+        extras.append(f"iter={it}")
+    suffix = f" ({', '.join(extras)})" if extras else ""
+    return f"{label}{suffix}…"
+
+
 def run_retriever(rag: AgenticRAG, question: str, top_k: int | None = None) -> None:
     if _HAS_RICH and _console is not None:
         with _console.status(
-            "[bold yellow]Retrieving...[/bold yellow]", spinner="dots"
-        ):
-            query, docs = rag.retrieve_documents(question, top_k=top_k)
+            "[bold yellow]Searching…[/bold yellow]", spinner="dots"
+        ) as status:
+
+            def _on_event(event: dict) -> None:
+                status.update(f"[bold yellow]{_format_node_event(event)}[/bold yellow]")
+
+            prev_cb = rag.trace_callback
+            rag.trace_callback = _on_event
+            try:
+                query, docs = rag.retrieve_documents(question, top_k=top_k)
+            finally:
+                rag.trace_callback = prev_cb
     else:
         print("Retrieving...")
         query, docs = rag.retrieve_documents(question, top_k=top_k)
@@ -644,7 +686,24 @@ def run_chat(
         contextualized = question
 
     async def _collect() -> tuple[str, list[Any], bool]:
-        _, docs = await rag._aretrieve_documents(contextualized)
+        if _HAS_RICH and _console is not None:
+            with _console.status(
+                "[bold yellow]Searching…[/bold yellow]", spinner="dots"
+            ) as status:
+
+                def _on_event(event: dict) -> None:
+                    status.update(
+                        f"[bold yellow]{_format_node_event(event)}[/bold yellow]"
+                    )
+
+                prev_cb = rag.trace_callback
+                rag.trace_callback = _on_event
+                try:
+                    _, docs = await rag._aretrieve_documents(contextualized)
+                finally:
+                    rag.trace_callback = prev_cb
+        else:
+            _, docs = await rag._aretrieve_documents(contextualized)
 
         grader_ok = True
         try:
