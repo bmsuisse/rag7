@@ -2715,6 +2715,58 @@ class AgenticRAG(FilterDetectionMixin, IntentFilterMixin, MemoryMixin):
             if content:
                 yield str(content)
 
+    async def astream_events(
+        self,
+        question: str,
+        *,
+        history: list[ConversationTurn] | None = None,
+        config: Any = None,
+    ):
+        """Stream the full QA graph as tagged events for live UIs.
+
+        Yields tuples of `(kind, payload)` where kind is one of:
+          - "node":  payload = node name (str) — emitted when a graph
+                     node finishes; lets a UI update a status spinner.
+          - "token": payload = LLM token text (str) — emitted from the
+                     generate node so a UI can render the answer as it
+                     streams.
+          - "state": payload = the current RAGState snapshot — emitted
+                     once at the end; useful for surfacing sources.
+        """
+        init = RAGState(
+            question=question,
+            query=question,
+            history=list(history or []),
+        )
+        state = await self._aparallel_start(init)
+        last_state: RAGState | None = None
+        async for mode, payload in self._graph.astream(
+            state, config=config, stream_mode=["updates", "messages"]
+        ):
+            if mode == "updates" and isinstance(payload, dict):
+                for node_name, node_payload in payload.items():
+                    yield ("node", node_name)
+                    if isinstance(node_payload, dict):
+                        try:
+                            last_state = RAGState(**{**state.model_dump(), **node_payload})
+                        except Exception:
+                            pass
+                    elif isinstance(node_payload, RAGState):
+                        last_state = node_payload
+            elif mode == "messages":
+                try:
+                    msg, meta = payload
+                except Exception:
+                    continue
+                if (
+                    getattr(msg, "content", None)
+                    and isinstance(meta, dict)
+                    and meta.get("langgraph_node") == "generate"
+                ):
+                    yield ("token", str(msg.content))
+        if last_state is not None:
+            yield ("state", last_state)
+
     def invoke(self, question: str, *, config: Any = None) -> RAGState:
         return _run_sync(self.ainvoke(question, config=config))
 

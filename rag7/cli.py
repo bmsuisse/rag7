@@ -895,6 +895,9 @@ def main() -> None:
         _print(f"[bold red]Failed to initialise: {exc}[/bold red]")
         sys.exit(1)
 
+    if args.top_k is not None:
+        rag.top_k = int(args.top_k)
+
     if config.get("backend") == "memory":
         _load_documents(rag)
 
