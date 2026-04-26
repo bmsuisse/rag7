@@ -110,6 +110,24 @@ class FilterIntent(BaseModel):
         default_factory=list,
         description="Additional values to exclude when operator is NOT_CONTAINS (e.g., 'nicht X oder Y' → value=X, extra_excludes=[Y]).",
     )
+    and_filters: list["FilterIntent"] = Field(
+        default_factory=list,
+        description="Additional AND conditions for compound queries (e.g. supplier CONTAINS brand AND article_name NOT_CONTAINS type).",
+    )
+
+
+class FieldRank(BaseModel):
+    name: str = Field(description="Field name as listed in the input.")
+    rank: int = Field(
+        description="Importance rank: 0 = most informative for representing the document, 9 = least."
+    )
+
+
+class FieldPriority(BaseModel):
+    ranks: list[FieldRank] = Field(
+        default_factory=list,
+        description="One entry per input field, every input field must appear exactly once.",
+    )
 
 
 class CollectionIntent(BaseModel):

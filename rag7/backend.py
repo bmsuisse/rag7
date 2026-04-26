@@ -121,8 +121,12 @@ class SearchBackend(ABC):
                 parts.append(
                     f'NOT {field_name} CONTAINS "{_escape_meili_value(extra)}"'
                 )
-            return " AND ".join(parts)
-        return f'{field_name} {op} "{value}"'
+        else:
+            parts = [f'{field_name} {op} "{value}"']
+        for af in getattr(intent, "and_filters", []):
+            if af.field:
+                parts.append(self.build_filter_expr(af))
+        return " AND ".join(parts)
 
 
 def _escape_meili_value(v: str) -> str:
@@ -141,8 +145,12 @@ def _build_sql_filter(intent: Any) -> str:
         parts = [f"{field_name} NOT ILIKE '%{value}%'"]
         for extra in intent.extra_excludes:
             parts.append(f"{field_name} NOT ILIKE '%{_escape_sql_value(extra)}%'")
-        return " AND ".join(parts)
-    return f"{field_name} {op} '{value}'"
+    else:
+        parts = [f"{field_name} {op} '{value}'"]
+    for af in getattr(intent, "and_filters", []):
+        if af.field:
+            parts.append(_build_sql_filter(af))
+    return " AND ".join(parts)
 
 
 def _build_odata_filter(intent: Any) -> str:
@@ -155,8 +163,12 @@ def _build_odata_filter(intent: Any) -> str:
         for extra in intent.extra_excludes:
             esc = extra.replace("'", "''")
             parts.append(f"not search.ismatch('{esc}', '{field_name}')")
-        return " and ".join(parts)
-    return f"{field_name} {op_map.get(op, op)} '{value}'"
+    else:
+        parts = [f"{field_name} {op_map.get(op, op)} '{value}'"]
+    for af in getattr(intent, "and_filters", []):
+        if af.field:
+            parts.append(_build_odata_filter(af))
+    return " and ".join(parts)
 
 
 class MeilisearchBackend(SearchBackend):
