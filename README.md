@@ -357,6 +357,39 @@ Async variant:
 state = await rag.achat("What is hybrid search?", history)
 ```
 
+### Cross-session memory with mem0
+
+`history=` only carries the current session. For facts that should
+persist across sessions (user preferences, past Q&A), plug
+[mem0](https://docs.mem0.ai) into the agent — it uses an LLM to
+extract discrete facts, deduplicate them, and resolve conflicts.
+
+```bash
+pip install mem0ai
+```
+
+```python
+from rag7 import Agent
+from mem0 import Memory  # or AsyncMemory for async-native I/O
+
+rag = Agent(index="articles", mem0_memory=Memory())
+
+cfg = {"configurable": {"user_id": "alice"}}
+rag.invoke("I prefer answers in German.", config=cfg)
+rag.invoke("What is hybrid search?", config=cfg)
+# → mem0 stored the language preference and recalls it on the second call
+```
+
+How it integrates: the graph runs `read_memory` before retrieval and
+`write_memory` after answer generation. Each call passes the
+`user_id` to mem0's `search`/`add` so memories are scoped per user.
+The `state.trace` will include a `read_memory` entry showing what was
+recalled. mem0 brings its own vector/graph store; see its
+[docs](https://docs.mem0.ai) to point it at OpenAI, Anthropic,
+Qdrant, Postgres, etc. See [`docs/memory.md`](docs/memory.md) for
+the full memory matrix (history vs. checkpointer vs. memory_store
+vs. mem0).
+
 ---
 
 ## 🏗️ Architecture

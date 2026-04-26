@@ -92,11 +92,35 @@ rag.invoke("Who are you?", config={"configurable": {"thread_id": "user-bob"}})
 
 ## Smarter long-term memory (mem0)
 
-`mem0` uses an LLM to extract discrete facts from each exchange, deduplicate them, and resolve conflicts — so "I moved to Berlin" replaces "I live in Munich" rather than creating two entries. It's the recommended choice when memory quality matters.
+[mem0](https://docs.mem0.ai) uses an LLM to extract discrete facts from
+each exchange, deduplicate them, and resolve conflicts — so "I moved
+to Berlin" replaces "I live in Munich" rather than creating two entries.
+It is the recommended choice when memory quality matters.
+
+### How rag7 wires it in
+
+The LangGraph state machine has two memory nodes — `read_memory` runs
+before retrieval, `write_memory` runs after generation. When you pass
+`mem0_memory=` to the agent, rag7 routes both nodes through mem0:
+
+| Node | mem0 call | What rag7 passes |
+| ---- | --------- | ----------------- |
+| `read_memory` | `search(question, filters={"user_id": ...})` | Top 5 hits become a context block prepended to retrieval. |
+| `write_memory` | `add(messages, user_id=...)` after the answer | mem0's LLM extracts facts; conflicts get resolved. |
+
+Both nodes read `user_id` from the request `config` (`config["configurable"]["user_id"]`).
+If a request arrives without a `user_id`, rag7 falls back to `"default"`.
+async-vs-sync detection happens automatically — pass `AsyncMemory()`
+and rag7 uses `asearch`/`aadd` directly; pass `Memory()` and rag7
+runs the sync calls in a thread pool so the event loop stays free.
+
+### Install
 
 ```bash
 pip install mem0ai
 ```
+
+### Minimal example
 
 ```python
 from rag7 import init_agent
@@ -114,13 +138,83 @@ config = {"configurable": {"user_id": "alice"}}
 
 rag.invoke("I prefer answers in German.", config=config)
 rag.invoke("What is hybrid search?", config=config)
-# mem0 extracted the language preference and recalled it on the second call
+# mem0 extracted the language preference and recalled it on the second call.
 ```
 
-mem0 supports its own vector and graph stores — see the [mem0 docs](https://docs.mem0.ai) for config options. The default uses OpenAI embeddings + a local vector DB.
+### Configuring mem0's own backends
 
-!!! tip "AsyncMemory"
-    Pass `AsyncMemory()` instead of `Memory()` for async-native calls — rag7 detects the `aadd` / `asearch` methods and avoids the thread-pool overhead.
+`Memory()` defaults to OpenAI embeddings + an embedded vector DB. To
+point it at the same vector store you already use for retrieval, pass
+mem0 a config dict:
+
+```python
+from mem0 import Memory
+
+mem = Memory.from_config({
+    "vector_store": {
+        "provider": "qdrant",
+        "config": {"host": "localhost", "port": 6333, "collection_name": "user_memories"},
+    },
+    "llm": {
+        "provider": "openai",
+        "config": {"model": "gpt-5.4-mini"},
+    },
+    "embedder": {
+        "provider": "openai",
+        "config": {"model": "text-embedding-3-small"},
+    },
+})
+
+rag = init_agent("docs", model="openai:gpt-5.4", backend="qdrant", mem0_memory=mem)
+```
+
+See the [mem0 docs](https://docs.mem0.ai) for the full provider list
+(Anthropic, Azure OpenAI, Postgres + pgvector, Chroma, etc.).
+
+### Inspecting recalled memories
+
+`state.trace` contains a `read_memory` entry whenever mem0 returned hits:
+
+```python
+state = rag.invoke("What is hybrid search?", config={"configurable": {"user_id": "alice"}})
+for step in state.trace:
+    if step["node"] == "read_memory":
+        print("Recalled facts:\n", step["memories"])
+```
+
+### Manually scoping users
+
+`user_id` partitions all memory ops. Two ways to set it:
+
+```python
+# 1. Via the per-call config (most common)
+rag.invoke(question, config={"configurable": {"user_id": "alice"}})
+
+# 2. Or bake a default into the agent and let mem0 see it
+import functools
+ainvoke = functools.partial(rag.ainvoke, config={"configurable": {"user_id": "alice"}})
+```
+
+### Failure modes & gotchas
+
+- **No mem0 LLM** → mem0 still stores raw turns but skips fact
+  extraction; quality matches `memory_store` (raw Q&A). Configure
+  mem0's own LLM to get the deduplication benefit.
+- **Slow first call** → mem0's first call seeds embeddings; expect
+  ~1–2 s extra latency on cold start. Subsequent calls are fast.
+- **Async event loop already running** (Jupyter, FastAPI handlers)
+  → use `AsyncMemory()`. rag7 detects `aadd`/`asearch` and avoids
+  the thread-pool round-trip.
+- **mem0 errors are swallowed** — rag7's memory nodes catch
+  exceptions silently so memory hiccups never break the QA path.
+  Check `state.trace` for missing `read_memory` events when
+  debugging.
+
+!!! tip "Combining with checkpointer"
+    `mem0_memory=` is orthogonal to `checkpointer=`. The checkpointer
+    persists *graph state* per `thread_id` (resume a conversation);
+    mem0 persists *extracted facts* per `user_id` (carry preferences
+    across sessions). Pass both for full coverage.
 
 ---
 
