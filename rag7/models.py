@@ -50,6 +50,13 @@ class RAGState(BaseModel):
     trace: list[dict[str, Any]] = Field(default_factory=list)
     grader_feedback: str | None = None
     grader_confidence: float | None = None
+    memory_context: str = Field(
+        default="",
+        description="Highly-relevant facts recalled from long-term memory. "
+        "Set by the read_memory node when score >= memory_relevance_threshold; "
+        "used as an extra BM25 term during retrieval and as a system-prompt "
+        "prefix during generation. Empty string when no memory met the bar.",
+    )
 
 
 class SearchQuery(BaseModel):

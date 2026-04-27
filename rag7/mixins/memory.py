@@ -12,10 +12,18 @@ if TYPE_CHECKING:
 class MemoryMixin:
     """Conversation-memory side of AgenticRAG: optional LangGraph store
     or mem0 backend, used by the read_memory / write_memory graph nodes.
+
+    The read path filters recalled memories by relevance score
+    (``memory_relevance_threshold``) before they reach the rest of the
+    graph. Only memories that clear the bar are placed in
+    ``state.memory_context`` — the field that retrieval and generation
+    consume. Below-threshold memories are still recorded in
+    ``state.trace`` for diagnostics but do not influence the answer.
     """
 
     _memory_store: Any
     _mem0_memory: Any
+    memory_relevance_threshold: float
 
     async def _aread_memory(
         self,
@@ -99,9 +107,50 @@ class MemoryMixin:
             )
             if not entries:
                 return {}
-            mem_text = "\n".join(f"- {r.get('memory', r)}" for r in entries[:5])
+            threshold = self.memory_relevance_threshold
+            relevant: list[str] = []
+            scanned: list[tuple[str, float | None]] = []
+            for r in entries[:10]:
+                if not isinstance(r, dict):
+                    continue
+                text = str(r.get("memory") or r)
+                raw_score = r.get("score")
+                try:
+                    score = float(raw_score) if raw_score is not None else None
+                except (TypeError, ValueError):
+                    score = None
+                scanned.append((text, score))
+                if score is not None and score >= threshold:
+                    relevant.append(text)
+            if not relevant:
+                return {
+                    "trace": state.trace
+                    + [
+                        {
+                            "node": "read_memory",
+                            "skipped": "below_threshold",
+                            "threshold": threshold,
+                            "best_score": max(
+                                (s for _, s in scanned if s is not None),
+                                default=None,
+                            ),
+                            "n_scanned": len(scanned),
+                        }
+                    ],
+                }
+            mem_text = "\n".join(f"- {m}" for m in relevant[:5])
             return {
-                "trace": state.trace + [{"node": "read_memory", "memories": mem_text}]
+                "trace": state.trace
+                + [
+                    {
+                        "node": "read_memory",
+                        "memories": mem_text,
+                        "n_kept": len(relevant[:5]),
+                        "n_scanned": len(scanned),
+                        "threshold": threshold,
+                    }
+                ],
+                "memory_context": mem_text,
             }
         except Exception:
             return {}

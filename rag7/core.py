@@ -344,6 +344,9 @@ class AgenticRAG(FilterDetectionMixin, IntentFilterMixin, MemoryMixin):
             os.getenv("RAG_RETRIEVAL_FACTOR", "4")
         )
         self.min_rerank_pool = int(os.getenv("RAG_MIN_RERANK_POOL", "24"))
+        self.memory_relevance_threshold = float(
+            os.getenv("RAG_MEMORY_RELEVANCE_THRESHOLD", "0.7")
+        )
         self.max_iter = max_iter or int(os.getenv("RAG_MAX_ITER", "3"))
         self.verbose = (
             verbose if verbose is not None else bool(int(os.getenv("RAG_VERBOSE", "0")))
@@ -1242,7 +1245,9 @@ class AgenticRAG(FilterDetectionMixin, IntentFilterMixin, MemoryMixin):
             else self.retrieval_factor
         )
         pool = max(self.top_k * factor, self.rerank_top_n * 4)
-        query, docs = await self._aretrieve_documents(state.question, top_k=pool)
+        query, docs = await self._aretrieve_documents(
+            state.question, top_k=pool, memory_context=state.memory_context
+        )
 
         if not docs and state.documents:
             docs = state.documents
@@ -1625,6 +1630,11 @@ class AgenticRAG(FilterDetectionMixin, IntentFilterMixin, MemoryMixin):
             for i, d in enumerate(state.documents[: self.top_k])
         )
         sys_content = prompts.ANSWER_SYSTEM
+        if state.memory_context:
+            sys_content += (
+                "\n\nKnown about the user (use only if directly relevant):\n"
+                f"{state.memory_context}"
+            )
         if state.grader_feedback:
             sys_content += (
                 f"\n\nSearch guidance for this attempt: {state.grader_feedback}"
@@ -2509,7 +2519,11 @@ class AgenticRAG(FilterDetectionMixin, IntentFilterMixin, MemoryMixin):
         return state.query, state.documents[:top_k]
 
     async def _aretrieve_documents(
-        self, query: str, top_k: int | None = None
+        self,
+        query: str,
+        top_k: int | None = None,
+        *,
+        memory_context: str = "",
     ) -> tuple[str, list[Document]]:
         await self._aensure_field_priority()
         k = top_k or self.top_k
@@ -2641,7 +2655,11 @@ class AgenticRAG(FilterDetectionMixin, IntentFilterMixin, MemoryMixin):
             ]
             if state.query not in extra_bm25:
                 extra_bm25.append(state.query)
-        extra_bm25 = extra_bm25[:3]
+        if memory_context:
+            mem_term = memory_context.strip().replace("\n", " ")[:200]
+            if mem_term and mem_term not in extra_bm25:
+                extra_bm25.append(mem_term)
+        extra_bm25 = extra_bm25[: 4 if memory_context else 3]
         broad_docs, bm25_empty = await self._asearch(
             _broad_query,
             question=state.question,
